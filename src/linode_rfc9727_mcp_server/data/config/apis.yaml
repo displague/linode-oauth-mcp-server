@@ -1,0 +1,16 @@
+# Canonical Linode API OpenAPI source. Specs are cached locally after fetch.
+apis:
+  linode:
+    description: "Linode API v4 for managing Akamai Cloud resources, accounts, and services."
+    tags: [cloud, compute, networking]
+    service_name: "linode"
+    specs:
+      - url: "https://raw.githubusercontent.com/linode/linode-api-openapi/main/openapi.json"
+
+# The client ID for a registered public Linode OAuth app is not a secret and
+# can be committed here once the project registers its shared app. Until then,
+# users can set LINODE_OAUTH_CLIENT_ID or use linode-cli/PAT credentials.
+oauth:
+  client_id: "5e801aa3c477ddbf8a00"
+  scopes: "linodes:read_only stackscripts:read_only"
+  redirect_uri: "http://localhost:8765/oauth/callback"
