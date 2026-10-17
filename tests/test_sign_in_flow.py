@@ -11,14 +11,14 @@ from fastmcp.client.elicitation import ElicitResult
 from fastmcp.server.providers.openapi import OpenAPIProvider
 from fastmcp.server.transforms.search import BM25SearchTransform
 
-from linode_rfc9727_mcp_server.auth import AuthManager
-from linode_rfc9727_mcp_server.main import (
+from linode_oauth_mcp_server.auth import AuthManager
+from linode_oauth_mcp_server.main import (
     OAUTH_SCOPES_META,
     LinodeAuth,
     SignInMiddleware,
     _component_fn,
 )
-from linode_rfc9727_mcp_server.oauth_scopes import OperationScopes
+from linode_oauth_mcp_server.oauth_scopes import OperationScopes
 
 PAT = {"personalAccessToken": []}
 SPEC = {
@@ -52,13 +52,22 @@ def _free_port() -> int:
 
 @pytest.fixture
 def server(monkeypatch):
-    for var in ("LINODE_API_TOKEN", "LINODE_OAUTH_TOKEN", "LINODE_CLI_TOKEN", "LINODE_OAUTH_SCOPES"):
+    for var in (
+        "LINODE_API_TOKEN",
+        "LINODE_OAUTH_TOKEN",
+        "LINODE_CLI_TOKEN",
+        "LINODE_OAUTH_SCOPES",
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("LINODE_CLI_CONFIG", "/nonexistent")
     monkeypatch.setenv("LINODE_OAUTH_CLIENT_ID", "client")
     port = _free_port()
-    monkeypatch.setenv("LINODE_OAUTH_REDIRECT_URI", f"http://127.0.0.1:{port}/oauth/callback")
-    monkeypatch.setattr("webbrowser.open", lambda url: pytest.fail("browser must not open"))
+    monkeypatch.setenv(
+        "LINODE_OAUTH_REDIRECT_URI", f"http://127.0.0.1:{port}/oauth/callback"
+    )
+    monkeypatch.setattr(
+        "webbrowser.open", lambda url: pytest.fail("browser must not open")
+    )
 
     auth = AuthManager()
     seen = []
@@ -75,7 +84,9 @@ def server(monkeypatch):
     )
     mcp = FastMCP("t")
     mcp.add_provider(
-        OpenAPIProvider(openapi_spec=SPEC, client=client, mcp_component_fn=_component_fn(scopes)),
+        OpenAPIProvider(
+            openapi_spec=SPEC, client=client, mcp_component_fn=_component_fn(scopes)
+        ),
         namespace="linode",
     )
     mcp.add_middleware(SignInMiddleware(auth))
@@ -89,13 +100,19 @@ def _browser(port, elicitations, action="accept"):
     async def handler(message, response_type, params, context):
         elicitations.append(params)
         if action == "accept":
-            state = urllib.parse.parse_qs(urllib.parse.urlparse(params.url).query)["state"][0]
+            state = urllib.parse.parse_qs(urllib.parse.urlparse(params.url).query)[
+                "state"
+            ][0]
 
             async def complete():
                 async with httpx2.AsyncClient() as http:
                     await http.post(
                         f"http://127.0.0.1:{port}/oauth/token",
-                        json={"access_token": "oauth-token", "expires_in": "7200", "state": state},
+                        json={
+                            "access_token": "oauth-token",
+                            "expires_in": "7200",
+                            "state": state,
+                        },
                     )
 
             asyncio.get_running_loop().create_task(complete())
@@ -127,9 +144,13 @@ async def test_sign_in_link_is_shown_by_client_then_call_completes(server):
 
 async def test_declined_sign_in_does_not_call_api(server):
     mcp, _, port, seen = server
-    async with Client(mcp, elicitation_handler=_browser(port, [], action="decline")) as client:
+    async with Client(
+        mcp, elicitation_handler=_browser(port, [], action="decline")
+    ) as client:
         result = await client.call_tool(
-            "call_tool", {"name": "linode_get_account", "arguments": {}}, raise_on_error=False
+            "call_tool",
+            {"name": "linode_get_account", "arguments": {}},
+            raise_on_error=False,
         )
     assert result.is_error
     assert "declined" in result.content[0].text
@@ -140,14 +161,16 @@ async def test_public_operation_needs_no_sign_in(server):
     mcp, _, port, seen = server
     elicitations = []
     async with Client(mcp, elicitation_handler=_browser(port, elicitations)) as client:
-        await client.call_tool("call_tool", {"name": "linode_get_regions", "arguments": {}})
+        await client.call_tool(
+            "call_tool", {"name": "linode_get_regions", "arguments": {}}
+        )
     assert elicitations == []
     assert seen == [("/v4/regions", None)]
 
 
 async def test_filter_is_sent_as_header_on_list_operations(monkeypatch, temp_dir):
-    from linode_rfc9727_mcp_server.config import Config
-    from linode_rfc9727_mcp_server.spec_manager import SpecManager
+    from linode_oauth_mcp_server.config import Config
+    from linode_oauth_mcp_server.spec_manager import SpecManager
 
     monkeypatch.setenv("LINODE_API_TOKEN", "pat")
     spec = {
@@ -160,7 +183,12 @@ async def test_filter_is_sent_as_header_on_list_operations(monkeypatch, temp_dir
                     "operationId": "get-stack-scripts",
                     "parameters": [
                         {"name": "page", "in": "query", "schema": {"type": "integer"}},
-                        {"name": "apiVersion", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {
+                            "name": "apiVersion",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        },
                     ],
                     "security": [PAT, {"oauth": ["stackscripts:read_only"]}],
                     "responses": {"200": {"description": "ok"}},
@@ -176,7 +204,9 @@ async def test_filter_is_sent_as_header_on_list_operations(monkeypatch, temp_dir
 
     def api(request):
         seen.append((request.url.path, request.headers.get("X-Filter")))
-        return httpx2.Response(200, json={"data": [], "page": 1, "pages": 1, "results": 0})
+        return httpx2.Response(
+            200, json={"data": [], "page": 1, "pages": 1, "results": 0}
+        )
 
     client = httpx2.AsyncClient(
         base_url="https://api.linode.com",
@@ -184,9 +214,12 @@ async def test_filter_is_sent_as_header_on_list_operations(monkeypatch, temp_dir
         auth=LinodeAuth(AuthManager(), OperationScopes(spec)),
     )
     mcp = FastMCP("t")
-    mcp.add_provider(OpenAPIProvider(openapi_spec=spec, client=client), namespace="linode")
+    mcp.add_provider(
+        OpenAPIProvider(openapi_spec=spec, client=client), namespace="linode"
+    )
     async with Client(mcp) as c:
         await c.call_tool(
-            "linode_get_stack_scripts", {"apiVersion": "v4", "X-Filter": '{"mine": true}'}
+            "linode_get_stack_scripts",
+            {"apiVersion": "v4", "X-Filter": '{"mine": true}'},
         )
     assert seen == [("/v4/linode/stackscripts", '{"mine": true}')]

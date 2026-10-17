@@ -51,7 +51,9 @@ def merge_scopes(*groups: Iterable[str]) -> FrozenSet[str]:
             return frozenset({"*"})
         resource, access = _split(scope)
         current = best.get(resource)
-        if current is None or _ACCESS_RANK.get(access, -1) > _ACCESS_RANK.get(current, -1):
+        if current is None or _ACCESS_RANK.get(access, -1) > _ACCESS_RANK.get(
+            current, -1
+        ):
             best[resource] = access
     return frozenset(f"{resource}:{access}" for resource, access in best.items())
 
@@ -89,7 +91,13 @@ class OperationScopes:
                 # Prefer literal segments over templated ones, e.g. /linode/types
                 # over /linode/{linodeId}.
                 routes.append(
-                    (params, -len(template), method.upper(), pattern, self._requirement(security))
+                    (
+                        params,
+                        -len(template),
+                        method.upper(),
+                        pattern,
+                        self._requirement(security),
+                    )
                 )
         routes.sort(key=lambda r: (r[0], r[1]))
         self._routes = routes

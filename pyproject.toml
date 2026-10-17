@@ -1,11 +1,19 @@
 [project]
-name = "linode-rfc9727-mcp-server"
-version = "0.1.0"
-description = "Linode API v4 OpenAPI MCP server with cached specifications"
-authors = [{ name = "Akamai RFC 9727 MCP Server contributors" }]
+name = "linode-oauth-mcp-server"
+dynamic = ["version"]
+description = "Linode API v4 MCP server with per-tool OAuth scopes and in-client sign-in"
+authors = [{ name = "Marques Johansson" }]
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE", "src/linode_oauth_mcp_server/swagger2openapi/LICENSE"]
 requires-python = ">=3.13"
+keywords = ["linode", "mcp", "model-context-protocol", "oauth", "openapi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+]
 dependencies = [
     "fastmcp==4.0.0b1",
     "fastmcp-slim==4.0.0b1",
@@ -27,21 +35,37 @@ dev = [
     "isort>=5.12.0",
     "flake8>=6.0.0",
     "mypy>=1.0.0",
+    "types-PyYAML",
 ]
 
+[project.urls]
+Homepage = "https://github.com/displague/linode-oauth-mcp-server"
+Issues = "https://github.com/displague/linode-oauth-mcp-server/issues"
+
 [project.scripts]
-linode-rfc9727-mcp-server = "linode_rfc9727_mcp_server.main:main"
+linode-oauth-mcp-server = "linode_oauth_mcp_server.main:main"
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["linode_rfc9727_mcp_server*"]
+include = ["linode_oauth_mcp_server*"]
 
 [tool.setuptools.package-data]
-linode_rfc9727_mcp_server = ["data/config/*.yaml"]
+linode_oauth_mcp_server = ["data/config/*.yaml"]
+
+[tool.setuptools_scm]
+# Untagged builds get a dev version; a v1.2.3 tag builds 1.2.3.
+fallback_version = "0.0.0"
+
+[tool.isort]
+profile = "black"
+
+[[tool.mypy.overrides]]
+module = ["jq"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

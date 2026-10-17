@@ -240,7 +240,7 @@ class SpecManager:
             logger.debug(f"Could not apply autogen operationIds: {e}")
 
         # Repair recurring authoring bugs that make otherwise-valid specs
-        # unparseable (found across the api-catalog by scripts/vet_specs.py).
+        # unparseable.
         self._sanitize_schema_quirks(merged_spec)
 
         # Catalog search transforms only index per-tool text (name,
@@ -646,20 +646,19 @@ class SpecManager:
     def _sanitize_schema_quirks(self, node: Any) -> None:
         """Fix common spec authoring bugs in place.
 
-        Found across the api-catalog by scripts/vet_specs.py:
-        - `type: file` is Swagger 2.0 syntax; several catalog specs declare
-          openapi 3.0 but still use it (billingv1, reports). OpenAPI 3
-          expresses binary payloads as string/binary.
-        - `pattern` regexes with ECMAScript named groups `(?<name>...)`
-          (access): JSON Schema validators built on Python's re require
+        - `type: file` is Swagger 2.0 syntax that some specs declaring
+          openapi 3.0 still use. OpenAPI 3 expresses binary payloads as
+          string/binary.
+        - `pattern` regexes with ECMAScript named groups `(?<name>...)`:
+          JSON Schema validators built on Python's re require
           `(?P<name>...)`.
-        - Boolean `exclusiveMaximum`/`exclusiveMinimum` (attachments) are
+        - Boolean `exclusiveMaximum`/`exclusiveMinimum` are
           JSON Schema draft-4 syntax; tool schemas are validated as 2020-12
           where they must be numeric. Converting to the numeric form would
           break the OpenAPI 3.0 document parse (a catch-22 between the two
           dialects), so drop the boolean and keep the inclusive bound.
         - Swagger 2.0 `collectionFormat` left inside OpenAPI 3 array schemas
-          (assets) is not a JSON Schema keyword and would leak into tool
+          is not a JSON Schema keyword and would leak into tool
           input schemas; OpenAPI 3 expresses it with parameter `style`.
         """
         if isinstance(node, dict):

@@ -1,6 +1,6 @@
-# Linode RFC 9727 MCP Server
+# Linode OAuth MCP Server
 
-An experimental MCP server that turns the Linode API v4 OpenAPI specification into tools. The API spec is fetched from Linode's official [OpenAPI distribution](https://github.com/linode/linode-api-openapi), parsed, cached on disk, and used to build the MCP tool catalog. Documentation search, Equinix service families, and Arazzo workflows from the upstream project have been removed.
+An experimental MCP server that turns the Linode API v4 OpenAPI specification into tools. Each tool requests only the OAuth scopes its operation needs, and the sign-in link appears in the MCP client's chat. The API spec is fetched from Linode's official [OpenAPI distribution](https://github.com/linode/linode-api-openapi), parsed, cached on disk, and used to build the MCP tool catalog. Documentation search, Equinix service families, and Arazzo workflows from the upstream project have been removed.
 
 This is a hard fork of [equinix-labs/equinix-docs-mcp-server](https://github.com/equinix-labs/equinix-docs-mcp-server). It retains the upstream MIT license; see [LICENSE](LICENSE).
 
@@ -8,9 +8,7 @@ This is a hard fork of [equinix-labs/equinix-docs-mcp-server](https://github.com
 
 The server exposes Linode API operations as `linode_<operationId>` tools. By default, FastMCP's search transform keeps the full tool catalog out of the initial list; use `search_tools` to find operations and `call_tool` to invoke them. `--tool-catalog full` lists every generated tool directly. Every paginated list tool accepts an `X-Filter` argument, a JSON string sent as Linode's [filter header](https://techdocs.akamai.com/linode-api/reference/filtering-and-sorting) (for example, `{"mine": true}`). The upstream spec declares that header on only a few operations.
 
-The server fetches the spec on first launch and stores it in the user's cache directory (`LINODE_MCP_CACHE_DIR` overrides the default). Later starts load the cached JSON copy, which takes about a second. After startup, the server checks the upstream spec in the background with a conditional GET using the cached `ETag`. An unchanged spec costs one small `304 Not Modified` request. If the spec has changed, the server fetches and caches it, and the new spec takes effect the next time the server starts. Run `linode-rfc9727-mcp-server --update-specs` to force a fresh fetch.
-
-The Akamai TechDocs RFC 9727 catalog at <https://techdocs.akamai.com/.well-known/api-catalog> is a Linkset that links to service catalogs and documentation. It does not currently point directly to a Linode OpenAPI file. Its `cloud-computing` subcatalog URL currently returns 404, so this Linode-only server uses the canonical OpenAPI distribution from `linode/linode-api-openapi` instead. Other Akamai APIs are intentionally out of scope and have not been validated here.
+The server fetches the spec on first launch and stores it in the user's cache directory (`LINODE_MCP_CACHE_DIR` overrides the default). Later starts load the cached JSON copy, which takes about a second. After startup, the server checks the upstream spec in the background with a conditional GET using the cached `ETag`. An unchanged spec costs one small `304 Not Modified` request. If the spec has changed, the server fetches and caches it, and the new spec takes effect the next time the server starts. Run `linode-oauth-mcp-server --update-specs` to force a fresh fetch.
 
 ## Authentication
 
@@ -28,7 +26,7 @@ The repo includes a shared public OAuth client ID. To register a replacement cli
 
 ```sh
 linode-cli account client-create \
-  --label "Linode RFC 9727 MCP Server" \
+  --label "Linode OAuth MCP Server" \
   --redirect_uri http://localhost:8765/oauth/callback \
   --public true
 ```
@@ -37,58 +35,55 @@ The returned `id` is public and safe to commit; do not publish a private client'
 
 ## Install and run
 
-Requires Python 3.13+.
-
-After cloning this repository, install and start it:
+Requires Python 3.13+. The package is published on PyPI as [`linode-oauth-mcp-server`](https://pypi.org/p/linode-oauth-mcp-server). Run it without installing, using either tool:
 
 ```sh
-pip install .
-linode-rfc9727-mcp-server
+uvx linode-oauth-mcp-server
+pipx run linode-oauth-mcp-server
 ```
+
+Both fetch the latest release on first use and cache it. To pick up a newer release, run `uvx linode-oauth-mcp-server@latest`, or pin a version with `uvx linode-oauth-mcp-server@0.2.0`. To install the command permanently, run `uv tool install linode-oauth-mcp-server` or `pipx install linode-oauth-mcp-server`.
 
 This starts the default stdio server for MCP clients that launch local processes. For ChatGPT, which connects to remote MCP endpoints, run the server over local Streamable HTTP and connect through a Secure MCP Tunnel:
 
 ```sh
-linode-rfc9727-mcp-server --transport http --host 127.0.0.1 --port 8000
+uvx linode-oauth-mcp-server --transport http --host 127.0.0.1 --port 8000
 ```
 
 The local MCP endpoint is `http://127.0.0.1:8000/mcp`. In ChatGPT, create a custom MCP connection and select an available Secure MCP Tunnel for this endpoint; use the resulting tunnel URL in the connection. Keep the local server running while testing. The HTTP endpoint has no separate MCP bearer authentication, so use it only locally behind a private tunnel; do not expose it directly to the public internet.
 
-For local development:
+The initial spec fetch requires network access. Later starts use the cached specification.
+
+## MCP client examples
+
+The server signs in through Linode's shared public OAuth client by default, so no token needs to be copied into client configuration. It also uses `LINODE_API_TOKEN` or an existing Linode CLI credential when one is present.
+
+### Claude Code
 
 ```sh
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-LINODE_API_TOKEN="your-token" linode-rfc9727-mcp-server
+claude mcp add linode -- uvx linode-oauth-mcp-server
 ```
 
-The initial cache fetch requires network access. Subsequent starts use the cached specification until it is refreshed.
-
-## MCP client example
-
-For a stdio client, either provide a token in the process environment, configure the shared public OAuth client, or let the server use an existing Linode CLI credential:
+Run `/mcp` in Claude Code to confirm that `linode` is connected.
 
 ### Codex CLI
 
-From the repository root, register the stdio server with Codex:
-
 ```sh
-codex mcp add linode -- uv run --project "$(pwd)" linode-rfc9727-mcp-server
+codex mcp add linode -- uvx linode-oauth-mcp-server
 ```
 
-If your Codex sandbox restricts writes to your home cache directory or blocks network access, use repo-local caches and fetch the spec once from your normal shell before adding the server:
+If your Codex sandbox restricts writes to your home cache directory or blocks network access, use local caches and fetch the spec once from your normal shell before adding the server:
 
 ```sh
-UV_CACHE_DIR="$(pwd)/.uv-cache" LINODE_MCP_CACHE_DIR="$(pwd)/.linode-mcp-cache" \
-  uv run --project "$(pwd)" linode-rfc9727-mcp-server --update-specs
+UV_CACHE_DIR="$PWD/.uv-cache" LINODE_MCP_CACHE_DIR="$PWD/.linode-mcp-cache" \
+  uvx linode-oauth-mcp-server --update-specs
 codex mcp add linode \
-  --env UV_CACHE_DIR="$(pwd)/.uv-cache" \
-  --env LINODE_MCP_CACHE_DIR="$(pwd)/.linode-mcp-cache" \
-  -- uv run --project "$(pwd)" linode-rfc9727-mcp-server
+  --env UV_CACHE_DIR="$PWD/.uv-cache" \
+  --env LINODE_MCP_CACHE_DIR="$PWD/.linode-mcp-cache" \
+  -- uvx linode-oauth-mcp-server
 ```
 
-`uv` installs/syncs the project dependencies on first launch. The server reads the authenticated Linode CLI token from `~/.config/linode-cli`, so no token needs to be copied into Codex configuration. After adding it, run `codex mcp list` to confirm the registration, then restart Codex so the server is loaded. The spec and uv caches in this example are gitignored.
+Run `codex mcp list` to confirm the registration, then restart Codex so the server is loaded.
 
 ### Other stdio clients
 
@@ -96,8 +91,8 @@ codex mcp add linode \
 {
   "mcpServers": {
     "linode": {
-      "command": "linode-rfc9727-mcp-server",
-      "env": { "LINODE_OAUTH_CLIENT_ID": "${LINODE_OAUTH_CLIENT_ID}" }
+      "command": "uvx",
+      "args": ["linode-oauth-mcp-server"]
     }
   }
 }
@@ -117,7 +112,7 @@ apis:
       - url: "https://raw.githubusercontent.com/linode/linode-api-openapi/main/openapi.json"
 ```
 
-Then run `linode-rfc9727-mcp-server --config path/to/apis.yaml --update-specs`.
+Then run `linode-oauth-mcp-server --config path/to/apis.yaml --update-specs`.
 
 ## Safety and limits
 
@@ -125,14 +120,38 @@ The upstream OpenAPI document includes read and write operations, including oper
 
 ## Development
 
+Run the server and tests from a checkout:
+
 ```sh
-pip install -e .[dev]
+uv run linode-oauth-mcp-server
+uv run --extra dev pytest
 ```
+
+To have an MCP client run your checkout instead of the PyPI release, register `uv run --project /path/to/checkout linode-oauth-mcp-server` as the command.
+
+## Releasing
+
+Versions come from git tags through `setuptools-scm`. Pushing a tag like `v0.2.0`, or publishing a GitHub release that creates one, runs [`.github/workflows/release.yml`](.github/workflows/release.yml). The workflow tests, builds, and publishes `0.2.0` to PyPI:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Publishing uses [PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/), which is based on GitHub's OpenID Connect tokens, so the repository stores no PyPI API token. One-time setup:
+
+1. On PyPI, open **Your account → Publishing → Add a new pending publisher** and enter:
+   - PyPI project name: `linode-oauth-mcp-server`
+   - Owner: `displague`
+   - Repository name: `linode-oauth-mcp-server`
+   - Workflow name: `release.yml`
+   - Environment name: `pypi`
+2. On GitHub, create an environment named `pypi` under **Settings → Environments**. Optionally, limit it to `v*` tags or require a reviewer.
+
+The first tagged release creates the PyPI project.
 
 ## References
 
-- [RFC 9727: API catalog well-known URI](https://www.rfc-editor.org/rfc/rfc9727)
-- [Akamai TechDocs API catalog](https://techdocs.akamai.com/.well-known/api-catalog)
 - [Linode API v4 reference](https://techdocs.akamai.com/linode-api/reference/api)
 - [Linode API authentication](https://techdocs.akamai.com/linode-api/reference/get-started)
 - [Linode OpenAPI spec distribution](https://github.com/linode/linode-api-openapi)

@@ -1,7 +1,7 @@
 # Canonical Linode API OpenAPI source. Specs are cached locally after fetch.
 apis:
   linode:
-    description: "Linode API v4 for managing Akamai Cloud resources, accounts, and services."
+    description: "Linode API v4 for managing Linode resources, accounts, and services."
     tags: [cloud, compute, networking]
     service_name: "linode"
     specs:

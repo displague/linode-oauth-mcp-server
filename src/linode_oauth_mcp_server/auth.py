@@ -46,7 +46,9 @@ def _linode_cli_token() -> Optional[str]:
                     break
         return token
     except (OSError, configparser.Error) as exc:
-        logger.debug("Unable to read Linode CLI credentials from %s: %s", config_path, exc)
+        logger.debug(
+            "Unable to read Linode CLI credentials from %s: %s", config_path, exc
+        )
         return None
 
 
@@ -80,7 +82,9 @@ async def _show_url_in_client(message: str, url: str, elicitation_id: str):
             related_request_id=request_context.request_id if request_context else None,
         )
     except Exception as exc:
-        logger.info("URL elicitation failed, falling back to the system browser: %s", exc)
+        logger.info(
+            "URL elicitation failed, falling back to the system browser: %s", exc
+        )
         return None
     if result.action != "accept":
         raise PermissionError(f"Linode sign-in was {result.action}d in the MCP client")
@@ -136,7 +140,9 @@ class AuthManager:
             or _linode_cli_token()
         )
         oauth_config = getattr(config, "oauth", {}) or {}
-        self.client_id = os.getenv("LINODE_OAUTH_CLIENT_ID") or oauth_config.get("client_id")
+        self.client_id = os.getenv("LINODE_OAUTH_CLIENT_ID") or oauth_config.get(
+            "client_id"
+        )
         self.scopes = parse_scopes(
             os.getenv("LINODE_OAUTH_SCOPES")
             or oauth_config.get("scopes", "linodes:read_only stackscripts:read_only")
@@ -165,7 +171,9 @@ class AuthManager:
         """Whether a call needing ``required`` must first run OAuth sign-in."""
         return bool(self.client_id) and not self._satisfies(required)
 
-    async def get_auth_header(self, required_scopes: FrozenSet[str] = frozenset()) -> Dict[str, str]:
+    async def get_auth_header(
+        self, required_scopes: FrozenSet[str] = frozenset()
+    ) -> Dict[str, str]:
         """Return a bearer header whose token covers ``required_scopes``."""
         if self._satisfies(required_scopes):
             return {"Authorization": f"Bearer {self.token}"}
@@ -177,14 +185,18 @@ class AuthManager:
         sign_in = await self.begin_sign_in(required_scopes)
         if not sign_in.presented:
             sign_in.presented = True
-            session = await _show_url_in_client(sign_in.message, sign_in.url, sign_in.state)
+            session = await _show_url_in_client(
+                sign_in.message, sign_in.url, sign_in.state
+            )
             if session is None:
                 opened = await asyncio.to_thread(webbrowser.open, sign_in.url)
                 if not opened:
                     logger.info("Open this Linode authorization URL: %s", sign_in.url)
             else:
                 sign_in.done.add_done_callback(
-                    lambda _: asyncio.ensure_future(_notify_complete(session, sign_in.state))
+                    lambda _: asyncio.ensure_future(
+                        _notify_complete(session, sign_in.state)
+                    )
                 )
         await self.wait_for_sign_in(sign_in)
         return {"Authorization": f"Bearer {self.token}"}
@@ -200,8 +212,9 @@ class AuthManager:
             if current is not None and not current.done.done():
                 if scopes_satisfy(current.scopes, scopes):
                     return current
-                current.task.cancel()
-                await asyncio.gather(current.task, return_exceptions=True)
+                if current.task is not None:
+                    current.task.cancel()
+                    await asyncio.gather(current.task, return_exceptions=True)
             self._sign_in = await self._start_sign_in(scopes)
             return self._sign_in
 
@@ -210,20 +223,26 @@ class AuthManager:
             await asyncio.shield(sign_in.done)
         except asyncio.CancelledError:
             if sign_in.done.cancelled():
-                raise PermissionError("Linode sign-in was replaced by a newer request") from None
+                raise PermissionError(
+                    "Linode sign-in was replaced by a newer request"
+                ) from None
             raise
 
     async def _start_sign_in(self, scopes: FrozenSet[str]) -> SignIn:
         """Listen for the OAuth callback and return the authorization URL."""
         parsed = urllib.parse.urlparse(self.redirect_uri)
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
-            raise ValueError("OAuth redirect URI must use http://127.0.0.1 or localhost")
+            raise ValueError(
+                "OAuth redirect URI must use http://127.0.0.1 or localhost"
+            )
         port = parsed.port or 80
         expected_path = parsed.path or "/"
         state = secrets.token_urlsafe(24)
         result: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
 
-        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        async def handle(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
             try:
                 head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10)
                 request_line = head.split(b"\r\n", 1)[0].decode("ascii", "replace")
@@ -248,7 +267,11 @@ class AuthManager:
                 elif method == "POST" and path == "/oauth/token":
                     headers = head.decode("latin1").split("\r\n")
                     length = next(
-                        (int(line.split(":", 1)[1]) for line in headers if line.lower().startswith("content-length:")),
+                        (
+                            int(line.split(":", 1)[1])
+                            for line in headers
+                            if line.lower().startswith("content-length:")
+                        ),
                         0,
                     )
                     payload = json.loads(await reader.readexactly(length))
@@ -295,12 +318,15 @@ class AuthManager:
         # Nobody may await a sign-in that is abandoned; don't warn about it.
         sign_in.done.add_done_callback(lambda f: f.cancelled() or f.exception())
         logger.info(
-            "Waiting for Linode OAuth authorization for scopes: %s", serialize_scopes(scopes)
+            "Waiting for Linode OAuth authorization for scopes: %s",
+            serialize_scopes(scopes),
         )
 
         async def complete() -> None:
             try:
-                payload = await asyncio.wait_for(result, timeout=SIGN_IN_TIMEOUT_SECONDS)
+                payload = await asyncio.wait_for(
+                    result, timeout=SIGN_IN_TIMEOUT_SECONDS
+                )
                 self.token = payload["access_token"]
                 self._expires_at = time.time() + int(payload.get("expires_in") or 7200)
                 # Linode's token redirect may omit scopes; assume the request was granted.
@@ -355,7 +381,8 @@ class AuthManager:
         self.granted_scopes = parse_scopes(saved.get("scopes"))
         self._static_token = False
         logger.info(
-            "Resumed saved Linode sign-in for scopes %s", serialize_scopes(self.granted_scopes)
+            "Resumed saved Linode sign-in for scopes %s",
+            serialize_scopes(self.granted_scopes),
         )
 
     def _save_token(self) -> None:
@@ -378,4 +405,3 @@ class AuthManager:
             os.replace(tmp, path)
         except OSError as exc:
             logger.warning("Could not save Linode sign-in to %s: %s", path, exc)
-

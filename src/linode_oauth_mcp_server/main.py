@@ -1,4 +1,4 @@
-"""Linode RFC 9727 API catalog MCP server."""
+"""Linode OAuth MCP server: Linode API v4 operations as MCP tools."""
 
 import asyncio
 import logging
@@ -7,9 +7,9 @@ from typing import Any, AsyncGenerator, List, Literal, Optional
 import click
 import httpx2
 import yaml
-from fastmcp import FastMCP
-from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.providers.openapi import OpenAPIProvider, OpenAPITool
 from fastmcp.server.transforms.search import BM25SearchTransform
 from fastmcp.tools.base import InputRequiredToolResult, ToolResult
@@ -21,6 +21,7 @@ from mcp_types import (
 )
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
+from . import __version__
 from .auth import AuthManager, client_supports_url_elicitation
 from .config import APIConfig, Config
 from .oauth_scopes import OperationScopes
@@ -57,8 +58,14 @@ class LinodeAuth(httpx2.Auth):
     async def async_auth_flow(
         self, request: httpx2.Request
     ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
-        requirement = self._operation_scopes.requirement(request.method, request.url.path)
-        if requirement is None or not requirement.public or self._auth_manager.has_token():
+        requirement = self._operation_scopes.requirement(
+            request.method, request.url.path
+        )
+        if (
+            requirement is None
+            or not requirement.public
+            or self._auth_manager.has_token()
+        ):
             scopes = requirement.scopes if requirement else frozenset()
             request.headers.update(await self._auth_manager.get_auth_header(scopes))
         yield request
@@ -84,12 +91,13 @@ class SignInMiddleware(Middleware):
         ctx = context.fastmcp_context
         request_context = ctx.request_context if ctx else None
         if (
-            request_context is None
+            ctx is None
+            or request_context is None
             or request_context.protocol_version not in MODERN_PROTOCOL_VERSIONS
             or not client_supports_url_elicitation(ctx.session)
         ):
             return await call_next(context)
-        scopes = await self._required_scopes(context)
+        scopes = await self._required_scopes(ctx, context)
         if not scopes or not self._auth_manager.needs_sign_in(scopes):
             return await call_next(context)
 
@@ -118,13 +126,15 @@ class SignInMiddleware(Middleware):
         await self._auth_manager.wait_for_sign_in(sign_in)
         return await call_next(context)
 
-    async def _required_scopes(self, context: MiddlewareContext) -> frozenset:
+    async def _required_scopes(
+        self, ctx: Context, context: MiddlewareContext
+    ) -> frozenset:
         name = context.message.name
         arguments = context.message.arguments or {}
         if name == self._call_tool_name and isinstance(arguments.get("name"), str):
             name = arguments["name"]
         try:
-            tool = await context.fastmcp_context.fastmcp.get_tool(name)
+            tool = await ctx.fastmcp.get_tool(name)
         except Exception:
             tool = None
         return frozenset((getattr(tool, "meta", None) or {}).get(OAUTH_SCOPES_META, ()))
@@ -217,7 +227,9 @@ class LinodeMCPServer:
         self._register_api_providers()
         self.mcp.add_middleware(SignInMiddleware(self.auth_manager))
         self.mcp.add_middleware(
-            ResponseFormattingMiddleware(self.response_formatter, list(self.config.apis))
+            ResponseFormattingMiddleware(
+                self.response_formatter, list(self.config.apis)
+            )
         )
         self._apply_catalog_transform()
 
@@ -254,12 +266,14 @@ class LinodeMCPServer:
                 logger.exception("Failed to build Linode API provider")
                 self.failed_providers[api_name] = str(exc)
 
-    def _build_api_client(self, operation_scopes: OperationScopes) -> httpx2.AsyncClient:
+    def _build_api_client(
+        self, operation_scopes: OperationScopes
+    ) -> httpx2.AsyncClient:
         client = httpx2.AsyncClient(
             base_url=API_BASE_URL,
             timeout=30.0,
             auth=LinodeAuth(self.auth_manager, operation_scopes),
-            headers={"User-Agent": "Linode-RFC9727-MCP-Server/0.1.0"},
+            headers={"User-Agent": f"Linode-OAuth-MCP-Server/{__version__}"},
         )
         self._api_clients.append(client)
         return client
@@ -280,7 +294,9 @@ class LinodeMCPServer:
                 raise RuntimeError(
                     "Code mode requires the optional FastMCP code-mode dependency"
                 ) from exc
-            self.mcp.add_transform(CodeMode(discovery_tools=[GetTags(), Search(), GetSchemas()]))
+            self.mcp.add_transform(
+                CodeMode(discovery_tools=[GetTags(), Search(), GetSchemas()])
+            )
             return
         self.mcp.add_transform(BM25SearchTransform(max_results=15))
 
@@ -300,16 +316,33 @@ class LinodeMCPServer:
 
 
 @click.command()
-@click.option("--config", "-c", default=None, help="Path to the Linode API configuration")
-@click.option("--update-specs", is_flag=True, help="Fetch and cache a fresh Linode API spec, then exit")
+@click.option(
+    "--config", "-c", default=None, help="Path to the Linode API configuration"
+)
+@click.option(
+    "--update-specs",
+    is_flag=True,
+    help="Fetch and cache a fresh Linode API spec, then exit",
+)
 @click.option(
     "--transport",
     type=click.Choice(["stdio", "http"], case_sensitive=False),
     default="stdio",
     help="MCP transport; use HTTP for remote clients and Secure MCP Tunnel",
 )
-@click.option("--host", default="127.0.0.1", show_default=True, help="Bind host for HTTP transport")
-@click.option("--port", type=int, default=8000, show_default=True, help="Bind port for HTTP transport")
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    show_default=True,
+    help="Bind host for HTTP transport",
+)
+@click.option(
+    "--port",
+    type=int,
+    default=8000,
+    show_default=True,
+    help="Bind port for HTTP transport",
+)
 @click.option(
     "--tool-catalog",
     type=click.Choice(["search", "code-mode", "full"], case_sensitive=False),
@@ -318,7 +351,9 @@ class LinodeMCPServer:
 )
 @click.option(
     "--log-level",
-    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], case_sensitive=False),
+    type=click.Choice(
+        ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], case_sensitive=False
+    ),
     default="INFO",
     help="Logging level",
 )
@@ -331,7 +366,7 @@ def main(
     tool_catalog: str,
     log_level: str,
 ) -> None:
-    """Start the Linode RFC 9727 API MCP server."""
+    """Start the Linode OAuth MCP server."""
     _configure_logging(log_level)
 
     async def _main() -> None:

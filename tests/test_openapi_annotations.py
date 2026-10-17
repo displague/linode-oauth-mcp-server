@@ -7,7 +7,7 @@ from fastmcp.server.providers.openapi import OpenAPIProvider
 from fastmcp.utilities.openapi import HTTPRoute
 from mcp_types import ToolAnnotations
 
-from linode_rfc9727_mcp_server.openapi_annotations import (
+from linode_oauth_mcp_server.openapi_annotations import (
     annotate_openapi_component,
     derive_tool_annotations,
 )

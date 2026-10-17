@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 def default_config_path() -> Path:
     """Path to the configuration bundled with the installed package."""
-    return Path(str(resources.files("linode_rfc9727_mcp_server"))) / (
+    return Path(str(resources.files("linode_oauth_mcp_server"))) / (
         "data/config/apis.yaml"
     )
 
@@ -26,7 +26,7 @@ def cache_root() -> Path:
     env = os.getenv("LINODE_MCP_CACHE_DIR")
     if env:
         return Path(env)
-    return Path(platformdirs.user_cache_dir("linode-rfc9727-mcp-server", appauthor=False))
+    return Path(platformdirs.user_cache_dir("linode-oauth-mcp-server", appauthor=False))
 
 
 class SpecSource(BaseModel):
@@ -81,6 +81,7 @@ class APIConfig(BaseModel):
     @property
     def url(self) -> str:
         return self.specs[0].url if self.specs else ""
+
 
 class Config(BaseModel):
     """Main configuration class."""

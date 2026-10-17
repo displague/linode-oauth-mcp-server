@@ -1,0 +1,56 @@
+name: Release
+
+# Pushing a tag like v0.2.0 (or publishing a GitHub release, which creates
+# the tag) builds that version and publishes it to PyPI.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # setuptools-scm derives the package version from the tag.
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+
+      - name: Test
+        run: uv run --extra dev pytest -q
+
+      - name: Build
+        run: uv build
+
+      - name: Check version matches tag
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          ls dist/
+          test -f "dist/linode_oauth_mcp_server-${expected}-py3-none-any.whl"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Must match the environment named in the PyPI trusted publisher.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/linode-oauth-mcp-server
+    permissions:
+      # Lets the job request a GitHub OIDC token, which PyPI exchanges for a
+      # short-lived upload token. No PyPI API token is stored in the repo.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

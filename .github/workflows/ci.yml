@@ -72,14 +72,14 @@ jobs:
         
     - name: Validate configuration
       run: |
-        python -c "from linode_rfc9727_mcp_server.config import Config; Config.load()"
+        python -c "from linode_oauth_mcp_server.config import Config; Config.load()"
         echo "✅ Packaged configuration is valid"
 
     - name: Check spec manager setup
       run: |
         python -c "
-        from linode_rfc9727_mcp_server.config import Config
-        from linode_rfc9727_mcp_server.spec_manager import SpecManager
+        from linode_oauth_mcp_server.config import Config
+        from linode_oauth_mcp_server.spec_manager import SpecManager
         config = Config.load()
         manager = SpecManager(config)
         assert config.get_api_names() == ['linode']

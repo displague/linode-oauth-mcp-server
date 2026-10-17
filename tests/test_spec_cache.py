@@ -4,8 +4,8 @@ import json
 
 import httpx2
 
-from linode_rfc9727_mcp_server.config import Config
-from linode_rfc9727_mcp_server.spec_manager import SpecManager
+from linode_oauth_mcp_server.config import Config
+from linode_oauth_mcp_server.spec_manager import SpecManager
 
 SPEC = {
     "openapi": "3.0.3",
