@@ -91,11 +91,10 @@ class ResponseFormatter:
         """Get format configuration for an operation ID."""
         # Operation IDs generated from OpenAPI tools are typically prefixed
         # with the API name, e.g. "linode_getLinode".
-        # Some custom API namespaces may contain hyphens or be
-        # normalized differently by the tool generator (e.g. "network_edge",
-        # "ne", etc.). Instead of relying on a single split, try to find the
-        # best-matching API config by scanning configured API names and
-        # attempting several common normalizations.
+        # Custom API namespaces may contain hyphens or be normalized
+        # differently by the tool generator. Instead of relying on a single
+        # split, find the best-matching API config by scanning configured
+        # API names and attempting several common normalizations.
 
         # Prefer double-underscore separator ("{api}__{operation}") but
         # fall back to single underscore for backward compatibility.

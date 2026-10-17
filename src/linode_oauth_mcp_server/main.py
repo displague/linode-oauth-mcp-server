@@ -11,7 +11,6 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.providers.openapi import OpenAPIProvider, OpenAPITool
-from fastmcp.server.transforms.search import BM25SearchTransform
 from fastmcp.tools.base import InputRequiredToolResult, ToolResult
 from mcp_types import (
     ElicitRequest,
@@ -27,15 +26,17 @@ from .config import APIConfig, Config
 from .oauth_scopes import OperationScopes
 from .openapi_annotations import annotate_openapi_component
 from .response_formatter import ResponseFormatter
+from .search import LinodeSearchTransform
 from .spec_manager import SpecManager
+from .tool_summaries import OAUTH_SCOPES_META, strip_schema, summarize_tools
 
 logger = logging.getLogger(__name__)
 CATALOG_CACHE_TTL_SECONDS = 3600
 CATALOG_CACHE_SCOPE: Literal["public", "private"] = "public"
 API_BASE_URL = "https://api.linode.com"
-# Tool meta key listing the OAuth scopes the operation requires.
-OAUTH_SCOPES_META = "linode/oauthScopes"
 SIGN_IN_INPUT = "linode_sign_in"
+CALL_TOOL_NAME = "call_tool"
+TOOL_SCHEMA_TOOL_NAME = "get_tool_schema"
 
 
 def _configure_logging(log_level: str) -> None:
@@ -71,6 +72,15 @@ class LinodeAuth(httpx2.Auth):
         yield request
 
 
+def _target_tool_name(context: MiddlewareContext) -> str:
+    """The tool a call runs, looking through the search transform's call_tool."""
+    name = getattr(context.message, "name", "") or ""
+    arguments = getattr(context.message, "arguments", None) or {}
+    if name == CALL_TOOL_NAME and isinstance(arguments.get("name"), str):
+        return arguments["name"]
+    return name
+
+
 class SignInMiddleware(Middleware):
     """Ask the MCP client to show the Linode sign-in link before a tool runs.
 
@@ -81,9 +91,8 @@ class SignInMiddleware(Middleware):
     the auth flow, which pushes the elicitation or opens the system browser.
     """
 
-    def __init__(self, auth_manager: AuthManager, call_tool_name: str = "call_tool"):
+    def __init__(self, auth_manager: AuthManager):
         self._auth_manager = auth_manager
-        self._call_tool_name = call_tool_name
 
     async def on_call_tool(
         self, context: MiddlewareContext, call_next: CallNext
@@ -129,12 +138,8 @@ class SignInMiddleware(Middleware):
     async def _required_scopes(
         self, ctx: Context, context: MiddlewareContext
     ) -> frozenset:
-        name = context.message.name
-        arguments = context.message.arguments or {}
-        if name == self._call_tool_name and isinstance(arguments.get("name"), str):
-            name = arguments["name"]
         try:
-            tool = await ctx.fastmcp.get_tool(name)
+            tool = await ctx.fastmcp.get_tool(_target_tool_name(context))
         except Exception:
             tool = None
         return frozenset((getattr(tool, "meta", None) or {}).get(OAUTH_SCOPES_META, ()))
@@ -168,7 +173,7 @@ class ResponseFormattingMiddleware(Middleware):
         self, context: MiddlewareContext, call_next: CallNext
     ) -> ToolResult:
         result = await call_next(context)
-        name = getattr(context.message, "name", "") or ""
+        name = _target_tool_name(context)
         if not name.startswith(self._api_prefixes) or result.is_error:
             return result
         data: Any = result.structured_content
@@ -298,7 +303,35 @@ class LinodeMCPServer:
                 CodeMode(discovery_tools=[GetTags(), Search(), GetSchemas()])
             )
             return
-        self.mcp.add_transform(BM25SearchTransform(max_results=15))
+        self._add_tool_schema_tool()
+        self.mcp.add_transform(
+            LinodeSearchTransform(
+                max_results=10,
+                call_tool_name=CALL_TOOL_NAME,
+                always_visible=[TOOL_SCHEMA_TOOL_NAME],
+                search_result_serializer=summarize_tools,
+            )
+        )
+
+    def _add_tool_schema_tool(self) -> None:
+        assert self.mcp is not None
+        mcp = self.mcp
+
+        @mcp.tool(name=TOOL_SCHEMA_TOOL_NAME, annotations={"readOnlyHint": True})
+        async def get_tool_schema(name: str) -> dict:
+            """Return a Linode API tool's full description and input schema.
+
+            Search results summarize parameters in one line each. Use this
+            before calling a tool whose nested parameters need more detail.
+            """
+            tool = await mcp.get_tool(name)
+            if tool is None or not name.startswith("linode_"):
+                raise ToolError(f"Unknown Linode API tool: {name!r}")
+            return {
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": strip_schema(tool.parameters),
+            }
 
     async def run(
         self,

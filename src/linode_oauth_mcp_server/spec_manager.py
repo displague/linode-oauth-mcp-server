@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 # The cache is JSON: a 10 MB spec loads in well under a second as JSON but
 # takes close to a minute through PyYAML.
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+# Bump when spec processing changes so caches written by older versions are
+# rebuilt instead of reused.
+CACHE_VERSION = 2
 
 
 def _sanitize_unicode(value: Any) -> Any:
@@ -232,7 +235,7 @@ class SpecManager:
 
         merged_spec = base_spec
 
-        # Some specs (e.g. workvisit) omit operationIds; synthesize them so
+        # Some specs omit operationIds; synthesize them so
         # every operation can become a tool.
         try:
             self._apply_autogen_operation_ids(merged_spec)
@@ -242,11 +245,6 @@ class SpecManager:
         # Repair recurring authoring bugs that make otherwise-valid specs
         # unparseable.
         self._sanitize_schema_quirks(merged_spec)
-
-        # Catalog search transforms only index per-tool text (name,
-        # description, parameters), so family-level context from info.title
-        # would otherwise be invisible to search.
-        self._inject_family_context(merged_spec, api_name, api_config)
 
         # Normalize auth: promote Authorization header parameters to security requirements
         try:
@@ -268,57 +266,6 @@ class SpecManager:
         "patch",
         "trace",
     )
-
-    def _inject_family_context(
-        self, spec: Dict[str, Any], api_name: str, api_config: APIConfig
-    ) -> None:
-        """Append family-level context to every operation description.
-
-        FastMCP derives each tool's description from the operation's
-        description (falling back to summary), and the catalog search
-        transforms index only that per-tool text. The spec's info block —
-        often the best statement of what the API family does (e.g. the
-        "diloa" family is titled "Digital LOA API") — never reaches the
-        index unless it is folded into each operation.
-        """
-        info = spec.get("info") or {}
-        title = str(info.get("title") or "").strip()
-        family_desc = (api_config.description or "").strip()
-        if not family_desc:
-            family_desc = self._summarize_info_description(
-                str(info.get("description") or "")
-            )
-
-        label = re.sub(r"\s+APIs?$", "", title) or api_name
-        parts = [f"Part of the Linode {label} API ({api_name})."]
-        if family_desc and family_desc.rstrip(".") != title.rstrip("."):
-            parts.append(family_desc.rstrip(".") + ".")
-        context = " ".join(parts)
-
-        for path_item in (spec.get("paths") or {}).values():
-            if not isinstance(path_item, dict):
-                continue
-            for method in self._HTTP_METHODS:
-                operation = path_item.get(method)
-                if not isinstance(operation, dict):
-                    continue
-                existing = str(
-                    operation.get("description") or operation.get("summary") or ""
-                ).strip()
-                if context in existing:
-                    continue
-                operation["description"] = (
-                    f"{existing}\n\n{context}" if existing else context
-                )
-
-    @staticmethod
-    def _summarize_info_description(text: str, max_len: int = 300) -> str:
-        """Collapse an info.description to a short single-line summary."""
-        collapsed = " ".join(text.split())
-        if len(collapsed) <= max_len:
-            return collapsed
-        cut = collapsed[:max_len].rsplit(" ", 1)[0]
-        return cut + "…"
 
     async def _fetch_and_cache_spec(
         self, spec_key: str, url: str
@@ -725,6 +672,7 @@ class SpecManager:
         """Save a merged specification to the cache."""
         path = self.get_merged_spec_path(api_name)
         self._write_json(path, spec)
+        self._save_meta(f"{api_name}-merged", {"cache_version": CACHE_VERSION})
         logger.info(f"Saved merged spec for {api_name} to {path}")
 
     def load_merged_spec(self, api_name: str) -> Optional[Dict[str, Any]]:
@@ -829,5 +777,9 @@ class SpecManager:
             if api_config.enabled:
                 merged_spec_path = self.get_merged_spec_path(api_name)
                 if not merged_spec_path.exists():
+                    return False
+                meta = self._load_meta(f"{api_name}-merged")
+                if meta.get("cache_version") != CACHE_VERSION:
+                    logger.info(f"Cached {api_name} spec is from an older version")
                     return False
         return True

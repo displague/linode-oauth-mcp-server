@@ -54,3 +54,18 @@ async def test_refresh_without_cached_validators_refetches(temp_dir):
     manager = _manager(temp_dir, lambda request: httpx2.Response(200, json=SPEC))
     assert await manager.refresh_if_changed() is True
     assert manager.has_all_cached_specs()
+
+
+async def test_merged_spec_has_no_injected_boilerplate(temp_dir):
+    manager = _manager(temp_dir, lambda request: httpx2.Response(200, json=SPEC))
+    await manager.update_specs()
+    operation = manager.load_merged_spec("linode")["paths"]["/v4/regions"]["get"]
+    assert "Part of the Linode" not in operation.get("description", "")
+
+
+def test_cache_from_older_version_is_rebuilt(temp_dir):
+    manager = _manager(temp_dir, lambda request: httpx2.Response(500))
+    manager.save_merged_spec("linode", SPEC)
+    assert manager.has_all_cached_specs()
+    (temp_dir / "linode-merged.meta.json").unlink()
+    assert not manager.has_all_cached_specs()
