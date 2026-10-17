@@ -5,7 +5,7 @@ description = "Linode API v4 MCP server with per-tool OAuth scopes and in-client
 authors = [{ name = "Marques Johansson" }]
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE", "src/linode_oauth_mcp_server/swagger2openapi/LICENSE"]
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 keywords = ["linode", "mcp", "model-context-protocol", "oauth", "openapi"]
 classifiers = [

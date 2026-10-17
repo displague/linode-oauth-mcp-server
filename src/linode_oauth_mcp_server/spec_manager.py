@@ -16,7 +16,6 @@ import httpx2
 import yaml
 
 from .config import APIConfig, Config, cache_root
-from .swagger2openapi.converter import Swagger2OpenAPIConverter
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +139,6 @@ class SpecManager:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         # Upstream specification locations may redirect, so follow them.
         self.http_client = httpx2.AsyncClient(follow_redirects=True)
-        self.converter = Swagger2OpenAPIConverter()
 
     async def update_specs(self) -> None:
         """Update all API specifications based on the configuration."""
@@ -281,9 +279,9 @@ class SpecManager:
             except ValueError:
                 spec = yaml.load(spec_content, Loader=_YAML_LOADER)
 
-            if spec.get("swagger") == "2.0":
-                logger.info(f"Converting Swagger 2.0 spec to OpenAPI 3.x for {url}")
-                spec = self.converter.convert(spec)
+            if not str(spec.get("openapi", "")).startswith("3."):
+                logger.error(f"{url} is not an OpenAPI 3 document")
+                return None
 
             self.save_cached_spec(spec_key, spec)
             self._save_meta(
