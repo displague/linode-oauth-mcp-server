@@ -190,9 +190,13 @@ class ResponseFormattingMiddleware(Middleware):
         except Exception:
             logger.exception("Could not render Linode response for %s", name)
             return result
+        # Clients such as Claude Code show structured content in place of
+        # text. call_tool declares no output schema, so return only the YAML;
+        # a directly listed API tool's output schema requires the data.
+        via_call_tool = getattr(context.message, "name", None) == CALL_TOOL_NAME
         return ToolResult(
             content=[TextContent(type="text", text=rendered)],
-            structured_content=data,
+            structured_content=None if via_call_tool else data,
         )
 
 

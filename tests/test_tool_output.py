@@ -172,3 +172,18 @@ def test_tokenize_folds_plurals():
         "policy",
         "status",
     ]
+
+
+async def test_search_and_call_tool_return_text_only(client):
+    tools = {t.name: t for t in await client.list_tools()}
+    assert tools["search_tools"].output_schema is None
+    search = await client.call_tool("search_tools", {"query": "list linodes"})
+    assert search.structured_content is None
+    assert search.content[0].text.startswith("Call a tool with call_tool.")
+
+    result = await client.call_tool(
+        "call_tool",
+        {"name": "linode_get_linode_instances", "arguments": {"apiVersion": "v4"}},
+    )
+    assert result.structured_content is None
+    assert result.content[0].text.startswith("data:")

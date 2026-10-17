@@ -93,6 +93,25 @@ class LinodeSearchTransform(BM25SearchTransform):
         self._linode_index: _Index | None = None
         self._linode_names: tuple = ()
 
+    def _make_search_tool(self) -> Tool:
+        # The stock tool declares an output schema for its str | list return,
+        # which wraps the markdown summary as {"result": "..."} structured
+        # content, and clients show that escaped JSON instead of the text.
+        return (
+            super()
+            ._make_search_tool()
+            .model_copy(
+                update={
+                    "output_schema": None,
+                    "description": (
+                        "Search the Linode API tools in natural language. Returns a "
+                        "compact summary of each match: title, purpose, access "
+                        "level, required OAuth scopes, and parameters."
+                    ),
+                }
+            )
+        )
+
     async def _search(self, tools: Sequence[Tool], query: str) -> Sequence[Tool]:
         names = tuple(t.name for t in tools)
         if self._linode_index is None or names != self._linode_names:
