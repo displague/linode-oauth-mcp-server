@@ -69,3 +69,19 @@ def test_cache_from_older_version_is_rebuilt(temp_dir):
     assert manager.has_all_cached_specs()
     (temp_dir / "linode-merged.meta.json").unlink()
     assert not manager.has_all_cached_specs()
+
+
+async def test_spec_downloads_send_user_agent(temp_dir):
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("User-Agent"))
+        return httpx2.Response(200, json=SPEC)
+
+    manager = SpecManager(Config.load(None), cache_dir=str(temp_dir))
+    manager.http_client = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(handler),
+        headers=manager.http_client.headers,
+    )
+    await manager.update_specs()
+    assert seen and seen[0].startswith("linode-oauth-mcp-server/")

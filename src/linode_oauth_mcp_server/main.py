@@ -20,7 +20,7 @@ from mcp_types import (
 )
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
-from . import __version__
+from . import user_agent
 from .auth import AuthManager, client_supports_url_elicitation
 from .config import APIConfig, Config
 from .oauth_scopes import OperationScopes
@@ -212,6 +212,7 @@ class LinodeMCPServer:
         self.mcp: Optional[FastMCP] = None
         self._api_clients: List[httpx2.AsyncClient] = []
         self._spec_refresh: Optional[asyncio.Task] = None
+        self._spec_version: Optional[str] = None
 
     async def initialize(self, force_update_specs: bool = False) -> None:
         if force_update_specs or not self.spec_manager.has_all_cached_specs():
@@ -264,6 +265,7 @@ class LinodeMCPServer:
                 continue
             try:
                 operation_scopes = OperationScopes(spec)
+                self._spec_version = (spec.get("info") or {}).get("version")
                 provider = OpenAPIProvider(
                     openapi_spec=spec,
                     client=self._build_api_client(operation_scopes),
@@ -282,7 +284,7 @@ class LinodeMCPServer:
             base_url=API_BASE_URL,
             timeout=30.0,
             auth=LinodeAuth(self.auth_manager, operation_scopes),
-            headers={"User-Agent": f"Linode-OAuth-MCP-Server/{__version__}"},
+            headers={"User-Agent": user_agent(self._spec_version)},
         )
         self._api_clients.append(client)
         return client

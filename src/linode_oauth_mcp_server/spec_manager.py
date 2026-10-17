@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import httpx2
 import yaml
 
+from . import user_agent
 from .config import APIConfig, Config, cache_root
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,9 @@ class SpecManager:
         self.cache_dir = Path(cache_dir) if cache_dir else cache_root() / "specs"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         # Upstream specification locations may redirect, so follow them.
-        self.http_client = httpx2.AsyncClient(follow_redirects=True)
+        self.http_client = httpx2.AsyncClient(
+            follow_redirects=True, headers={"User-Agent": user_agent()}
+        )
 
     async def update_specs(self) -> None:
         """Update all API specifications based on the configuration."""

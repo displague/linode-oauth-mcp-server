@@ -97,11 +97,16 @@ SPEC = {
 }
 
 
+sent_user_agents: list = []
+
+
 @pytest.fixture
 async def client(monkeypatch):
+    sent_user_agents.clear()
     monkeypatch.setenv("LINODE_API_TOKEN", "pat")
 
     def api(request):
+        sent_user_agents.append(request.headers.get("User-Agent"))
         return httpx2.Response(
             200, json={"data": [{"id": 1, "label": "web"}], "results": 1}
         )
@@ -187,3 +192,18 @@ async def test_search_and_call_tool_return_text_only(client):
     )
     assert result.structured_content is None
     assert result.content[0].text.startswith("data:")
+
+
+async def test_api_requests_send_versioned_user_agent(client):
+    import platform
+
+    from linode_oauth_mcp_server import __version__
+
+    await client.call_tool(
+        "call_tool",
+        {"name": "linode_get_linode_instances", "arguments": {"apiVersion": "v4"}},
+    )
+    assert sent_user_agents == [
+        f"linode-oauth-mcp-server/{__version__} linode-api-openapi/4.229.1 "
+        f"python/{platform.python_version()}"
+    ]
