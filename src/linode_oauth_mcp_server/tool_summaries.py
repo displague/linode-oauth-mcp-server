@@ -8,7 +8,8 @@ leave full input schemas to an explicit lookup.
 """
 
 import re
-from typing import Any, Dict, List, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from fastmcp.tools.base import Tool
 
@@ -44,7 +45,7 @@ def _first_sentence(text: str) -> str:
     return match.group(1) if match else plain
 
 
-def _type_of(schema: Dict[str, Any]) -> str:
+def _type_of(schema: dict[str, Any]) -> str:
     if "enum" in schema:
         values = [v for v in schema["enum"] if v is not None]
         shown = " | ".join(
@@ -67,7 +68,7 @@ def _type_of(schema: Dict[str, Any]) -> str:
     return str(kind)
 
 
-def _parameter_lines(schema: Dict[str, Any]) -> List[str]:
+def _parameter_lines(schema: dict[str, Any]) -> list[str]:
     required = set(schema.get("required") or [])
     lines = []
     for name, prop in (schema.get("properties") or {}).items():

@@ -2,7 +2,8 @@
 
 import asyncio
 import logging
-from typing import Any, AsyncGenerator, List, Literal, Optional
+from collections.abc import AsyncGenerator
+from typing import Any, Literal
 
 import click
 import httpx2
@@ -22,7 +23,7 @@ from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from . import user_agent
 from .auth import AuthManager, client_supports_url_elicitation
-from .config import APIConfig, Config
+from .config import Config
 from .oauth_scopes import OperationScopes
 from .openapi_annotations import annotate_openapi_component
 from .response_formatter import ResponseFormatter
@@ -165,7 +166,7 @@ def _component_fn(operation_scopes: OperationScopes):
 class ResponseFormattingMiddleware(Middleware):
     """Render structured API responses as YAML for human readability."""
 
-    def __init__(self, formatter: ResponseFormatter, api_names: List[str]):
+    def __init__(self, formatter: ResponseFormatter, api_names: list[str]):
         self._formatter = formatter
         self._api_prefixes = tuple(f"{name}_" for name in api_names)
 
@@ -203,16 +204,16 @@ class ResponseFormattingMiddleware(Middleware):
 class LinodeMCPServer:
     """Expose the Linode v4 OpenAPI operations as MCP tools."""
 
-    def __init__(self, config_path: Optional[str] = None, tool_catalog: str = "search"):
+    def __init__(self, config_path: str | None = None, tool_catalog: str = "search"):
         self.config = Config.load(config_path)
         self.auth_manager = AuthManager(self.config)
         self.spec_manager = SpecManager(self.config)
         self.response_formatter = ResponseFormatter(self.config)
         self.tool_catalog = tool_catalog
-        self.mcp: Optional[FastMCP] = None
-        self._api_clients: List[httpx2.AsyncClient] = []
-        self._spec_refresh: Optional[asyncio.Task] = None
-        self._spec_version: Optional[str] = None
+        self.mcp: FastMCP | None = None
+        self._api_clients: list[httpx2.AsyncClient] = []
+        self._spec_refresh: asyncio.Task | None = None
+        self._spec_version: str | None = None
 
     async def initialize(self, force_update_specs: bool = False) -> None:
         if force_update_specs or not self.spec_manager.has_all_cached_specs():
@@ -397,7 +398,7 @@ class LinodeMCPServer:
     help="Logging level",
 )
 def main(
-    config: Optional[str],
+    config: str | None,
     update_specs: bool,
     transport: str,
     host: str,

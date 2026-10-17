@@ -10,7 +10,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx2
 import yaml
@@ -62,7 +62,7 @@ X_FILTER_PARAMETER = {
 }
 
 
-def _add_filter_header(spec: Dict[str, Any]) -> None:
+def _add_filter_header(spec: dict[str, Any]) -> None:
     """Give every paginated list operation an ``X-Filter`` string parameter.
 
     Linode honors ``X-Filter`` on all paginated GETs, but the spec declares it
@@ -72,7 +72,7 @@ def _add_filter_header(spec: Dict[str, Any]) -> None:
     """
     shared = (spec.get("components") or {}).get("parameters") or {}
 
-    def name(param: Dict[str, Any]) -> Optional[str]:
+    def name(param: dict[str, Any]) -> str | None:
         ref = param.get("$ref")
         if isinstance(ref, str):
             param = shared.get(ref.rsplit("/", 1)[-1], {})
@@ -95,7 +95,7 @@ def _add_filter_header(spec: Dict[str, Any]) -> None:
             path_item["parameters"] = [p for p in inherited if name(p) != "X-Filter"]
 
 
-def deep_merge(d: Dict[str, Any], u: collections.abc.Mapping) -> Dict[str, Any]:
+def deep_merge(d: dict[str, Any], u: collections.abc.Mapping) -> dict[str, Any]:
     """
     Merge two dictionaries recursively.
 
@@ -134,7 +134,7 @@ def _update_references(obj: Any) -> Any:
 class SpecManager:
     """Manages fetching, caching, and merging of OpenAPI specifications."""
 
-    def __init__(self, config: Config, cache_dir: Optional[str] = None):
+    def __init__(self, config: Config, cache_dir: str | None = None):
         self.config = config
         self.cache_dir = Path(cache_dir) if cache_dir else cache_root() / "specs"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -189,7 +189,7 @@ class SpecManager:
     async def _process_api_group(self, api_name: str, api_config: APIConfig) -> None:
         """Process a single group of API specifications."""
         logger.info(f"Processing API group: {api_name}")
-        base_spec: Optional[Dict[str, Any]] = None
+        base_spec: dict[str, Any] | None = None
         for i, spec_source in enumerate(api_config.specs):
             spec = await self._fetch_and_cache_spec(f"{api_name}_{i}", spec_source.url)
             if not spec:
@@ -270,7 +270,7 @@ class SpecManager:
 
     async def _fetch_and_cache_spec(
         self, spec_key: str, url: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Fetch a spec from a URL, validate, and cache it."""
         try:
             response = await self.http_client.get(url)
@@ -310,7 +310,7 @@ class SpecManager:
         # If all fails, try to load from cache as a last resort.
         return self.load_cached_spec(spec_key)
 
-    def _promote_auth_header_to_security(self, spec: Dict[str, Any]) -> None:
+    def _promote_auth_header_to_security(self, spec: dict[str, Any]) -> None:
         """Normalize auth using OAS3 security with a root default.
 
         Strategy:
@@ -323,7 +323,7 @@ class SpecManager:
             return
 
         components = spec.get("components", {}) or {}
-        comp_params: Dict[str, Any] = components.get("parameters", {}) or {}
+        comp_params: dict[str, Any] = components.get("parameters", {}) or {}
 
         # Identify candidate global Authorization header parameters
         auth_param_keys: set[str] = set()
@@ -344,7 +344,7 @@ class SpecManager:
                 auth_param_keys.add(key)
 
         # Ensure at least one bearer scheme exists to validate references if needed.
-        sec_schemes: Dict[str, Any] = components.get("securitySchemes", {}) or {}
+        sec_schemes: dict[str, Any] = components.get("securitySchemes", {}) or {}
         if not any(
             isinstance(v, dict)
             and v.get("type") == "http"
@@ -358,12 +358,12 @@ class SpecManager:
             components.setdefault("securitySchemes", sec_schemes)
             spec.setdefault("components", components)
 
-        paths: Dict[str, Any] = spec.get("paths", {}) or {}
+        paths: dict[str, Any] = spec.get("paths", {}) or {}
         if not paths:
             return
 
         # Helper to test if a parameter dict is an Authorization header
-        def _is_inline_auth_param(p: Dict[str, Any]) -> bool:
+        def _is_inline_auth_param(p: dict[str, Any]) -> bool:
             if not isinstance(p, dict):
                 return False
             if p.get("in") != "header":
@@ -421,12 +421,12 @@ class SpecManager:
         # If we removed all uses of a global auth parameter, we can optionally keep it for docs
         # but no need to delete it here.
 
-    def get_merged_spec(self) -> Dict[str, Any]:
+    def get_merged_spec(self) -> dict[str, Any]:
         """Merge all individual API specs into a single spec."""
         all_specs = self.get_all_merged_specs()
 
         # Start with a base structure for the merged spec
-        merged_spec: Dict[str, Any] = {
+        merged_spec: dict[str, Any] = {
             "openapi": "3.1.0",
             "info": {
                 "title": "Linode API",
@@ -467,8 +467,8 @@ class SpecManager:
                 )
 
                 # Then prefix operationIds
-                for path, path_item in filtered_paths.items():
-                    for method, operation in path_item.items():
+                for path_item in filtered_paths.values():
+                    for operation in path_item.values():
                         if isinstance(operation, dict) and "operationId" in operation:
                             operation["operationId"] = (
                                 f"{api_name}_{operation['operationId']}"
@@ -520,7 +520,7 @@ class SpecManager:
 
         return merged_spec
 
-    def _apply_autogen_operation_ids(self, spec: Dict[str, Any]) -> None:
+    def _apply_autogen_operation_ids(self, spec: dict[str, Any]) -> None:
         """Generate operationId values for operations that lack them.
 
         Rules:
@@ -631,7 +631,7 @@ class SpecManager:
             for item in node:
                 self._sanitize_schema_quirks(item)
 
-    def get_provider_spec(self, api_name: str) -> Optional[Dict[str, Any]]:
+    def get_provider_spec(self, api_name: str) -> dict[str, Any] | None:
         """Load one API family's spec, ready for provider registration.
 
         Applies the configured include/exclude operationId filters but leaves
@@ -658,9 +658,9 @@ class SpecManager:
         path.with_suffix(".yaml").unlink(missing_ok=True)
 
     @staticmethod
-    def _read_json(path: Path) -> Optional[Any]:
+    def _read_json(path: Path) -> Any | None:
         try:
-            with open(path, "r") as f:
+            with open(path) as f:
                 return json.load(f)
         except FileNotFoundError:
             return None
@@ -669,14 +669,14 @@ class SpecManager:
         """Get the path to the merged spec file."""
         return self.cache_dir / f"{api_name}-merged.json"
 
-    def save_merged_spec(self, api_name: str, spec: Dict[str, Any]) -> None:
+    def save_merged_spec(self, api_name: str, spec: dict[str, Any]) -> None:
         """Save a merged specification to the cache."""
         path = self.get_merged_spec_path(api_name)
         self._write_json(path, spec)
         self._save_meta(f"{api_name}-merged", {"cache_version": CACHE_VERSION})
         logger.info(f"Saved merged spec for {api_name} to {path}")
 
-    def load_merged_spec(self, api_name: str) -> Optional[Dict[str, Any]]:
+    def load_merged_spec(self, api_name: str) -> dict[str, Any] | None:
         """Load a merged specification from the cache."""
         return self._read_json(self.get_merged_spec_path(api_name))
 
@@ -684,13 +684,13 @@ class SpecManager:
         """Get the path to a cached specification file."""
         return self.cache_dir / f"{spec_key}.json"
 
-    def save_cached_spec(self, spec_key: str, spec: Dict[str, Any]) -> None:
+    def save_cached_spec(self, spec_key: str, spec: dict[str, Any]) -> None:
         """Save a fetched specification to the cache."""
         path = self.get_cached_spec_path(spec_key)
         self._write_json(path, spec)
         logger.info(f"Cached spec {spec_key} to {path}")
 
-    def load_cached_spec(self, spec_key: str) -> Optional[Dict[str, Any]]:
+    def load_cached_spec(self, spec_key: str) -> dict[str, Any] | None:
         """Load a cached specification."""
         path = self.get_cached_spec_path(spec_key)
         spec = self._read_json(path)
@@ -703,14 +703,14 @@ class SpecManager:
     def _meta_path(self, spec_key: str) -> Path:
         return self.cache_dir / f"{spec_key}.meta.json"
 
-    def _load_meta(self, spec_key: str) -> Dict[str, Any]:
+    def _load_meta(self, spec_key: str) -> dict[str, Any]:
         return self._read_json(self._meta_path(spec_key)) or {}
 
-    def _save_meta(self, spec_key: str, meta: Dict[str, Any]) -> None:
+    def _save_meta(self, spec_key: str, meta: dict[str, Any]) -> None:
         with open(self._meta_path(spec_key), "w") as f:
             json.dump(meta, f, indent=2)
 
-    def get_all_merged_specs(self) -> Dict[str, Dict[str, Any]]:
+    def get_all_merged_specs(self) -> dict[str, dict[str, Any]]:
         """Load all merged specifications from the cache."""
         specs = {}
         for api_name in self.config.apis.keys():
@@ -720,8 +720,8 @@ class SpecManager:
         return specs
 
     def _filter_paths_by_operation_id(
-        self, api_name: str, paths: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, api_name: str, paths: dict[str, Any]
+    ) -> dict[str, Any]:
         """Filter paths based on include/exclude patterns for operation IDs."""
         api_config = self.config.get_api_config(api_name)
         if not api_config or (not api_config.include and not api_config.exclude):

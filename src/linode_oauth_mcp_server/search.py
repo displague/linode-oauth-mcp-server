@@ -11,7 +11,7 @@ matches "linode".
 import math
 import re
 import unicodedata
-from typing import Dict, List, Sequence
+from collections.abc import Sequence
 
 from fastmcp.server.transforms.search import BM25SearchTransform
 from fastmcp.tools.base import Tool
@@ -33,7 +33,7 @@ def _stem(token: str) -> str:
     return token
 
 
-def tokenize(text: str) -> List[str]:
+def tokenize(text: str) -> list[str]:
     normalized = unicodedata.normalize("NFKC", text).casefold()
     return [_stem(token) for token in _TOKEN.findall(normalized)]
 
@@ -52,21 +52,21 @@ def searchable_text(tool: Tool) -> str:
 class _Index:
     """BM25 Okapi over pre-tokenized documents."""
 
-    def __init__(self, documents: List[List[str]], k1: float = 1.5, b: float = 0.75):
+    def __init__(self, documents: list[list[str]], k1: float = 1.5, b: float = 0.75):
         self._k1, self._b = k1, b
-        self._tf: List[Dict[str, int]] = []
-        self._df: Dict[str, int] = {}
+        self._tf: list[dict[str, int]] = []
+        self._df: dict[str, int] = {}
         self._lengths = [len(doc) for doc in documents]
         self._avg = sum(self._lengths) / len(documents) if documents else 0.0
         for doc in documents:
-            tf: Dict[str, int] = {}
+            tf: dict[str, int] = {}
             for token in doc:
                 tf[token] = tf.get(token, 0) + 1
             for token in tf:
                 self._df[token] = self._df.get(token, 0) + 1
             self._tf.append(tf)
 
-    def query(self, tokens: List[str], top_k: int) -> List[int]:
+    def query(self, tokens: list[str], top_k: int) -> list[int]:
         n = len(self._tf)
         scores = [0.0] * n
         for token in set(tokens):

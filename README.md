@@ -125,6 +125,14 @@ uv run linode-oauth-mcp-server
 uv run --extra dev pytest
 ```
 
+Lint, format, and type check the way CI does:
+
+```sh
+uv run --extra dev ruff check src tests
+uv run --extra dev ruff format src tests
+uv run --extra dev ty check src
+```
+
 To have an MCP client run your checkout instead of the PyPI release, register `uv run --project /path/to/checkout linode-oauth-mcp-server` as the command.
 
 ## Releasing

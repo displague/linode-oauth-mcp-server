@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import yaml
 
@@ -16,10 +16,10 @@ class ResponseFormatter:
 
     def __init__(self, config: Config):
         self.config = config
-        self.jq_cache: Dict[str, Any] = {}
-        self._current_operation_id: Optional[str] = None
+        self.jq_cache: dict[str, Any] = {}
+        self._current_operation_id: str | None = None
 
-    def set_operation_context(self, operation_id: Optional[str]) -> None:
+    def set_operation_context(self, operation_id: str | None) -> None:
         """Set the current operation context for formatting decisions."""
         self._current_operation_id = operation_id
 
@@ -29,7 +29,7 @@ class ResponseFormatter:
             return self.jq_cache[jq_filter]
 
         try:
-            import jq
+            import jq  # ty: ignore[unresolved-import]  # compiled, untyped
 
             program = jq.compile(jq_filter)
             self.jq_cache[jq_filter] = program
@@ -41,7 +41,7 @@ class ResponseFormatter:
             logger.error(f"Failed to compile JQ filter '{jq_filter}': {e}")
             return None
 
-    def _apply_jq_filters(self, data: Any, filters: List[str]) -> Any:
+    def _apply_jq_filters(self, data: Any, filters: list[str]) -> Any:
         """Apply a list of JQ filters in sequence."""
         result = data
         logger.debug(
@@ -87,7 +87,7 @@ class ResponseFormatter:
 
     def _get_format_config(
         self, operation_id: str
-    ) -> Optional[Union[str, List[str], Dict[str, str]]]:
+    ) -> str | list[str] | dict[str, str] | None:
         """Get format configuration for an operation ID."""
         # Operation IDs generated from OpenAPI tools are typically prefixed
         # with the API name, e.g. "linode_getLinode".

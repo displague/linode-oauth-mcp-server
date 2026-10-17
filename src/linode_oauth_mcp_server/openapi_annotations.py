@@ -22,7 +22,7 @@ any annotations already set on the component.
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
 from fastmcp.server.providers.openapi import OpenAPITool
 from fastmcp.utilities.openapi import HTTPRoute
@@ -32,13 +32,13 @@ logger = logging.getLogger(__name__)
 
 ANNOTATIONS_EXTENSION = "x-mcp-annotations"
 
-_READ_ONLY: Dict[str, Any] = {
+_READ_ONLY: dict[str, Any] = {
     "read_only_hint": True,
     "destructive_hint": False,
     "idempotent_hint": True,
 }
 
-METHOD_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
+METHOD_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "GET": _READ_ONLY,
     "HEAD": _READ_ONLY,
     "OPTIONS": _READ_ONLY,
@@ -57,7 +57,7 @@ METHOD_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def _hints(annotations: Any) -> Dict[str, Any]:
+def _hints(annotations: Any) -> dict[str, Any]:
     """Return the explicitly set (non-None) fields of a ToolAnnotations."""
     if annotations is None:
         return {}
@@ -71,7 +71,7 @@ def derive_tool_annotations(
     route: HTTPRoute, existing: ToolAnnotations | None = None
 ) -> ToolAnnotations:
     """Build annotations for an OpenAPI route, merged with existing ones."""
-    merged: Dict[str, Any] = {"open_world_hint": True}
+    merged: dict[str, Any] = {"open_world_hint": True}
     merged.update(METHOD_ANNOTATIONS.get(route.method.upper(), {}))
 
     override = route.extensions.get(ANNOTATIONS_EXTENSION)

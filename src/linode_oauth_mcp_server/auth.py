@@ -16,7 +16,7 @@ import urllib.parse
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Optional
+from typing import Any
 
 from .config import cache_root
 from .oauth_scopes import merge_scopes, parse_scopes, scopes_satisfy, serialize_scopes
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 SIGN_IN_TIMEOUT_SECONDS = 300
 
 
-def _linode_cli_token() -> Optional[str]:
+def _linode_cli_token() -> str | None:
     """Load a token from the official Linode CLI environment/config file."""
     token = os.getenv("LINODE_CLI_TOKEN")
     if token:
@@ -105,13 +105,13 @@ def client_supports_url_elicitation(session: Any) -> bool:
 class SignIn:
     """A Linode browser sign-in waiting for its loopback callback."""
 
-    scopes: FrozenSet[str]
+    scopes: frozenset[str]
     url: str
     state: str
     done: asyncio.Future
     # True once the MCP client has shown ``url``, so nothing opens it again.
     presented: bool = False
-    task: Optional[asyncio.Task] = field(default=None, repr=False)
+    task: asyncio.Task | None = field(default=None, repr=False)
 
     @property
     def message(self) -> str:
@@ -147,7 +147,7 @@ class AuthManager:
             os.getenv("LINODE_OAUTH_SCOPES")
             or oauth_config.get("scopes", "linodes:read_only stackscripts:read_only")
         )
-        self.granted_scopes: FrozenSet[str] = frozenset()
+        self.granted_scopes: frozenset[str] = frozenset()
         self._static_token = bool(self.token)
         self.redirect_uri = os.getenv(
             "LINODE_OAUTH_REDIRECT_URI",
@@ -155,25 +155,25 @@ class AuthManager:
         )
         self._expires_at = float("inf") if self.token else 0
         self._oauth_lock = asyncio.Lock()
-        self._sign_in: Optional[SignIn] = None
+        self._sign_in: SignIn | None = None
         if not self.token:
             self._load_saved_token()
 
     def has_token(self) -> bool:
         return bool(self.token) and time.time() < self._expires_at - 30
 
-    def _satisfies(self, required: FrozenSet[str]) -> bool:
+    def _satisfies(self, required: frozenset[str]) -> bool:
         return self.has_token() and (
             self._static_token or scopes_satisfy(self.granted_scopes, required)
         )
 
-    def needs_sign_in(self, required: FrozenSet[str]) -> bool:
+    def needs_sign_in(self, required: frozenset[str]) -> bool:
         """Whether a call needing ``required`` must first run OAuth sign-in."""
         return bool(self.client_id) and not self._satisfies(required)
 
     async def get_auth_header(
-        self, required_scopes: FrozenSet[str] = frozenset()
-    ) -> Dict[str, str]:
+        self, required_scopes: frozenset[str] = frozenset()
+    ) -> dict[str, str]:
         """Return a bearer header whose token covers ``required_scopes``."""
         if self._satisfies(required_scopes):
             return {"Authorization": f"Bearer {self.token}"}
@@ -201,7 +201,7 @@ class AuthManager:
         await self.wait_for_sign_in(sign_in)
         return {"Authorization": f"Bearer {self.token}"}
 
-    async def begin_sign_in(self, required: FrozenSet[str]) -> SignIn:
+    async def begin_sign_in(self, required: frozenset[str]) -> SignIn:
         """Start (or reuse) a sign-in covering granted plus ``required`` scopes.
 
         Earlier grants are kept so stepping up never drops access.
@@ -228,7 +228,7 @@ class AuthManager:
                 ) from None
             raise
 
-    async def _start_sign_in(self, scopes: FrozenSet[str]) -> SignIn:
+    async def _start_sign_in(self, scopes: frozenset[str]) -> SignIn:
         """Listen for the OAuth callback and return the authorization URL."""
         parsed = urllib.parse.urlparse(self.redirect_uri)
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
@@ -337,7 +337,7 @@ class AuthManager:
             except asyncio.CancelledError:
                 sign_in.done.cancel()
                 raise
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 sign_in.done.set_exception(
                     TimeoutError(
                         f"Linode sign-in for scopes {serialize_scopes(scopes)} was not "

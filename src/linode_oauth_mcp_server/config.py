@@ -3,7 +3,7 @@
 import os
 from importlib import resources
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import platformdirs
 import yaml
@@ -39,38 +39,38 @@ class APIConfig(BaseModel):
     """Configuration for an API group (namespace)."""
 
     # Not part of the YAML; set by loader for convenience/back-compat
-    name: Optional[str] = Field(default=None, description="API key/name in config")
+    name: str | None = Field(default=None, description="API key/name in config")
 
-    specs: List[SpecSource] = Field(
+    specs: list[SpecSource] = Field(
         default_factory=list,
         description="List of spec sources to merge under this API namespace",
     )
-    auth_type: Optional[str] = Field(
+    auth_type: str | None = Field(
         default=None, description="Authentication type for this API group"
     )
-    service_name: Optional[str] = Field(
+    service_name: str | None = Field(
         default=None, description="Service name (used for path normalization)"
     )
     enabled: bool = Field(default=True, description="Enable/disable this API")
-    description: Optional[str] = Field(
+    description: str | None = Field(
         default=None,
         description="Human-readable summary of this API family; appended to "
         "every generated tool description so catalog search can match tools "
         "by product name. Overrides the spec's info title/description.",
     )
-    tags: List[str] = Field(
+    tags: list[str] = Field(
         default_factory=list,
         description="Extra tags applied to this API's tools.",
     )
-    include: List[str] = Field(
+    include: list[str] = Field(
         default_factory=list,
         description="Regex patterns of operationIds to include (after prefix)",
     )
-    exclude: List[str] = Field(
+    exclude: list[str] = Field(
         default_factory=list,
         description="Regex patterns of operationIds to exclude (after prefix)",
     )
-    format: Dict[str, Union[str, List[str], Dict[str, str]]] = Field(
+    format: dict[str, str | list[str] | dict[str, str]] = Field(
         default_factory=dict,
         description="JQ format strings per operationId for response transformation. "
         "Can be a single string, list of strings (applied in sequence), "
@@ -86,14 +86,14 @@ class APIConfig(BaseModel):
 class Config(BaseModel):
     """Main configuration class."""
 
-    config_path: Optional[str] = Field(
+    config_path: str | None = Field(
         default=None, description="Path to the loaded config file"
     )
-    apis: Dict[str, APIConfig] = Field(default_factory=dict)
-    oauth: Dict[str, Any] = Field(default_factory=dict)
+    apis: dict[str, APIConfig] = Field(default_factory=dict)
+    oauth: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
-    def load(cls, config_path: Optional[str] = None) -> "Config":
+    def load(cls, config_path: str | None = None) -> "Config":
         """Load configuration from a YAML file.
 
         When config_path is omitted, the configuration bundled with the
@@ -105,7 +105,7 @@ class Config(BaseModel):
         if not path.exists():
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
-        with open(path, "r") as f:
+        with open(path) as f:
             config_data = yaml.safe_load(f)
 
         # Convert API configs to APIConfig objects
@@ -116,7 +116,7 @@ class Config(BaseModel):
                     raise ValueError(f"Invalid API config for {name}: {api_data}")
 
                 # Allow a compact single-spec config as well as a spec list.
-                specs_list: List[SpecSource] = []
+                specs_list: list[SpecSource] = []
                 if "specs" in api_data and isinstance(api_data["specs"], list):
                     for item in api_data["specs"]:
                         if not isinstance(item, dict) or "url" not in item:
@@ -128,7 +128,7 @@ class Config(BaseModel):
                         specs_list.append(SpecSource(url=api_data["url"]))
 
                 # Build model dict
-                model_data: Dict[str, Any] = {
+                model_data: dict[str, Any] = {
                     "name": name,
                     "specs": specs_list,
                     "auth_type": api_data.get("auth_type"),
@@ -159,10 +159,10 @@ class Config(BaseModel):
         with open(path, "w") as f:
             yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
-    def get_api_names(self) -> List[str]:
+    def get_api_names(self) -> list[str]:
         """Get list of configured API names."""
         return list(self.apis.keys())
 
-    def get_api_config(self, name: str) -> Optional[APIConfig]:
+    def get_api_config(self, name: str) -> APIConfig | None:
         """Get configuration for a specific API."""
         return self.apis.get(name)

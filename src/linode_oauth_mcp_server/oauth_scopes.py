@@ -6,14 +6,15 @@ endpoint takes them comma-separated in the ``scopes`` query parameter.
 """
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Any
 
 HTTP_METHODS = {"get", "put", "post", "delete", "patch", "head", "options", "trace"}
 _ACCESS_RANK = {"read_only": 0, "read_write": 1, "*": 2}
 
 
-def parse_scopes(value: Optional[str]) -> FrozenSet[str]:
+def parse_scopes(value: str | None) -> frozenset[str]:
     """Parse a comma- or space-separated scope string."""
     return frozenset(s for s in re.split(r"[,\s]+", value or "") if s)
 
@@ -22,7 +23,7 @@ def serialize_scopes(scopes: Iterable[str]) -> str:
     return ",".join(sorted(scopes))
 
 
-def _split(scope: str) -> Tuple[str, str]:
+def _split(scope: str) -> tuple[str, str]:
     resource, _, access = scope.partition(":")
     return resource, access
 
@@ -32,7 +33,7 @@ def scopes_satisfy(granted: Iterable[str], required: Iterable[str]) -> bool:
     granted = set(granted)
     if "*" in granted:
         return True
-    best: Dict[str, int] = {}
+    best: dict[str, int] = {}
     for scope in granted:
         resource, access = _split(scope)
         best[resource] = max(best.get(resource, -1), _ACCESS_RANK.get(access, -1))
@@ -43,9 +44,9 @@ def scopes_satisfy(granted: Iterable[str], required: Iterable[str]) -> bool:
     return True
 
 
-def merge_scopes(*groups: Iterable[str]) -> FrozenSet[str]:
+def merge_scopes(*groups: Iterable[str]) -> frozenset[str]:
     """Union scope sets, keeping only the strongest access per resource."""
-    best: Dict[str, str] = {}
+    best: dict[str, str] = {}
     for scope in (s for group in groups for s in group):
         if scope == "*":
             return frozenset({"*"})
@@ -68,15 +69,15 @@ class AuthRequirement:
     """
 
     public: bool = False
-    scopes: FrozenSet[str] = frozenset()
+    scopes: frozenset[str] = frozenset()
 
 
 class OperationScopes:
     """Look up an operation's auth requirement by HTTP method and request path."""
 
-    def __init__(self, spec: Dict[str, Any]):
+    def __init__(self, spec: dict[str, Any]):
         root_security = spec.get("security")
-        routes: List[Tuple[int, int, str, re.Pattern, AuthRequirement]] = []
+        routes: list[tuple[int, int, str, re.Pattern, AuthRequirement]] = []
         for template, path_item in (spec.get("paths") or {}).items():
             if not isinstance(path_item, dict):
                 continue
@@ -103,7 +104,7 @@ class OperationScopes:
         self._routes = routes
 
     @staticmethod
-    def _requirement(security: Optional[List[Dict[str, List[str]]]]) -> AuthRequirement:
+    def _requirement(security: list[dict[str, list[str]]] | None) -> AuthRequirement:
         if security is None:
             return AuthRequirement()
         if not security or any(not req for req in security):
@@ -113,7 +114,7 @@ class OperationScopes:
                 return AuthRequirement(scopes=frozenset(req["oauth"]))
         return AuthRequirement()
 
-    def requirement(self, method: str, path: str) -> Optional[AuthRequirement]:
+    def requirement(self, method: str, path: str) -> AuthRequirement | None:
         method = method.upper()
         for _, _, route_method, pattern, requirement in self._routes:
             if route_method == method and pattern.match(path):

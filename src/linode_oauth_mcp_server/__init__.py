@@ -2,7 +2,6 @@
 
 import platform
 from importlib.metadata import PackageNotFoundError, version
-from typing import Optional
 
 try:
     # Set at build time from the git tag by setuptools-scm.
@@ -12,7 +11,7 @@ except PackageNotFoundError:
 __description__ = "Linode API v4 OpenAPI MCP server with scoped OAuth sign-in"
 
 
-def user_agent(spec_version: Optional[str] = None) -> str:
+def user_agent(spec_version: str | None = None) -> str:
     """User-Agent in linode-cli's style: client, spec version, Python."""
     parts = [f"linode-oauth-mcp-server/{__version__}"]
     if spec_version:
