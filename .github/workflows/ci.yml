@@ -58,3 +58,15 @@ jobs:
           assert config.get_api_names() == ['linode']
           print('SpecManager initialization successful')
           "
+
+  lint-arazzo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Rules come from .spectral.yaml (spectral:arazzo). Lints the workflows
+      # listed under workflows: in apis.yaml.
+      - name: Lint Arazzo workflows with Spectral
+        uses: stoplightio/spectral-action@v0.8.13
+        with:
+          file_glob: "src/linode_oauth_mcp_server/data/config/*.arazzo.yaml"

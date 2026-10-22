@@ -14,3 +14,7 @@ oauth:
   client_id: "5e801aa3c477ddbf8a00"
   scopes: "linodes:read_only stackscripts:read_only"
   redirect_uri: "http://localhost:8765/oauth/callback"
+
+# Arazzo documents whose workflows become workflow_<workflowId> tools.
+workflows:
+  - workflows.arazzo.yaml

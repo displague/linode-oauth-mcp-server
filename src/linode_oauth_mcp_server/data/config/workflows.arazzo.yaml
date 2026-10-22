@@ -1,0 +1,338 @@
+# Multi-step Linode operations that need ordering or waiting, each exposed as
+# a workflow_<workflowId> tool. Steps name operations by operationId from the
+# Linode API v4 spec; a workflow whose operations are missing from the cached
+# spec is skipped at startup.
+arazzo: 1.0.1
+info:
+  title: Linode workflows
+  version: 1.0.0
+  description: >-
+    Guided Linode API operations that power-cycle, detach or recycle
+    resources in the order the API requires, and wait for each change to
+    finish.
+sourceDescriptions:
+  - name: linode
+    url: https://raw.githubusercontent.com/linode/linode-api-openapi/main/openapi.json
+    type: openapi
+
+workflows:
+  - workflowId: resize-linode-disk
+    summary: Resize a Linode disk
+    # Powers the Linode off while the disk resizes
+    x-mcp-annotations: {destructiveHint: true}
+    description: >-
+      Shuts the Linode down if it is running, resizes the disk, waits for the
+      resize to finish, and boots the Linode again if it was running. A disk
+      can only be resized while its Linode is offline. Growing a disk needs
+      unallocated space in the plan; shrinking it needs a filesystem that
+      fits the new size.
+    inputs:
+      type: object
+      required: [linodeId, diskId, size]
+      properties:
+        linodeId:
+          type: integer
+          description: The Linode that owns the disk.
+        diskId:
+          type: integer
+          description: The disk to resize.
+        size:
+          type: integer
+          description: The new disk size in MB.
+    steps:
+      - stepId: check_status
+        description: Wait for a stable power state.
+        operationId: get-linode-instance
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: linodeId, in: path, value: $inputs.linodeId}
+        successCriteria:
+          - condition: $response.body#/status == 'running' || $response.body#/status == 'offline'
+        outputs:
+          initialStatus: $response.body#/status
+        onSuccess:
+          - name: already-offline
+            type: goto
+            stepId: resize
+            criteria:
+              - condition: $response.body#/status == 'offline'
+        onFailure:
+          - name: wait-for-stable-state
+            type: retry
+            retryAfter: 5
+            retryLimit: 60
+            criteria:
+              - condition: $statusCode == 200
+      - stepId: shut_down
+        operationId: post-shutdown-linode-instance
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: linodeId, in: path, value: $inputs.linodeId}
+      - stepId: wait_offline
+        operationId: get-linode-instance
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: linodeId, in: path, value: $inputs.linodeId}
+        successCriteria:
+          - condition: $response.body#/status == 'offline'
+        onFailure:
+          - name: poll
+            type: retry
+            retryAfter: 5
+            retryLimit: 120
+            criteria:
+              - condition: $statusCode == 200
+      - stepId: resize
+        operationId: post-resize-disk
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: linodeId, in: path, value: $inputs.linodeId}
+          - {name: diskId, in: path, value: $inputs.diskId}
+        requestBody:
+          contentType: application/json
+          payload:
+            size: $inputs.size
+      - stepId: wait_disk_ready
+        description: Wait until the disk is ready at its new size.
+        operationId: get-linode-disk
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: linodeId, in: path, value: $inputs.linodeId}
+          - {name: diskId, in: path, value: $inputs.diskId}
+        successCriteria:
+          - condition: $response.body#/status == 'ready' && $response.body#/size == $inputs.size
+        outputs:
+          size: $response.body#/size
+        onSuccess:
+          - name: leave-offline
+            type: end
+            criteria:
+              - condition: $steps.check_status.outputs.initialStatus == 'offline'
+        onFailure:
+          - name: poll
+            type: retry
+            retryAfter: 10
+            retryLimit: 180
+            criteria:
+              - condition: $statusCode == 200
+      - stepId: boot
+        description: Boot the last booted configuration.
+        operationId: post-boot-linode-instance
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: linodeId, in: path, value: $inputs.linodeId}
+      - stepId: wait_running
+        operationId: get-linode-instance
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: linodeId, in: path, value: $inputs.linodeId}
+        successCriteria:
+          - condition: $response.body#/status == 'running'
+        onFailure:
+          - name: poll
+            type: retry
+            retryAfter: 5
+            retryLimit: 120
+            criteria:
+              - condition: $statusCode == 200
+    outputs:
+      initialStatus: $steps.check_status.outputs.initialStatus
+      size: $steps.wait_disk_ready.outputs.size
+
+  - workflowId: move-volume
+    summary: Move a volume to another Linode
+    # Detaching removes the disk from a running Linode
+    x-mcp-annotations: {destructiveHint: true}
+    description: >-
+      Detaches a Block Storage volume, waits for the detach to finish,
+      attaches it to the target Linode and waits for the attachment. Attaching
+      before a detach finishes fails. The target Linode must be in the
+      volume's region. Unmount the volume on its current Linode first.
+    inputs:
+      type: object
+      required: [volumeId, linodeId]
+      properties:
+        volumeId:
+          type: integer
+          description: The volume to move.
+        linodeId:
+          type: integer
+          description: The Linode to attach the volume to.
+        configId:
+          type: integer
+          description: >-
+            The target Linode's configuration profile to add the volume to.
+            Defaults to its last booted configuration.
+    steps:
+      - stepId: get_volume
+        operationId: get-volume
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: volumeId, in: path, value: $inputs.volumeId}
+        outputs:
+          previousLinodeId: $response.body#/linode_id
+        onSuccess:
+          - name: already-attached
+            type: end
+            criteria:
+              - condition: $response.body#/linode_id == $inputs.linodeId
+          - name: not-attached
+            type: goto
+            stepId: attach
+            criteria:
+              - condition: $response.body#/linode_id == null
+      - stepId: detach
+        operationId: post-detach-volume
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: volumeId, in: path, value: $inputs.volumeId}
+      - stepId: wait_detached
+        operationId: get-volume
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: volumeId, in: path, value: $inputs.volumeId}
+        successCriteria:
+          - condition: $response.body#/linode_id == null
+        onFailure:
+          - name: poll
+            type: retry
+            retryAfter: 5
+            retryLimit: 60
+            criteria:
+              - condition: $statusCode == 200
+      - stepId: attach
+        operationId: post-attach-volume
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: volumeId, in: path, value: $inputs.volumeId}
+        requestBody:
+          contentType: application/json
+          payload:
+            linode_id: $inputs.linodeId
+            config_id: $inputs.configId
+      - stepId: wait_attached
+        operationId: get-volume
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: volumeId, in: path, value: $inputs.volumeId}
+        successCriteria:
+          - condition: $response.body#/linode_id == $inputs.linodeId && $response.body#/status == 'active'
+        outputs:
+          linodeId: $response.body#/linode_id
+          filesystemPath: $response.body#/filesystem_path
+        onFailure:
+          - name: poll
+            type: retry
+            retryAfter: 5
+            retryLimit: 60
+            criteria:
+              - condition: $statusCode == 200
+    outputs:
+      previousLinodeId: $steps.get_volume.outputs.previousLinodeId
+      linodeId: $steps.wait_attached.outputs.linodeId
+      filesystemPath: $steps.wait_attached.outputs.filesystemPath
+
+  - workflowId: upgrade-lke-cluster
+    summary: Upgrade an LKE cluster's Kubernetes version
+    description: >-
+      Sets the cluster's Kubernetes version, then recycles every node so the
+      nodes run it; changing the version alone leaves existing nodes on the
+      old one. Waits until every Linode that was a node before the recycle is
+      gone and all pool nodes are ready. If the cluster is already on the
+      version, its nodes are still recycled. Recycling deletes local storage
+      on the nodes, such as emptyDir and hostPath volumes.
+    inputs:
+      type: object
+      required: [clusterId, k8sVersion]
+      properties:
+        clusterId:
+          type: integer
+          description: The LKE cluster to upgrade.
+        k8sVersion:
+          type: string
+          description: The Kubernetes version to upgrade to, such as "1.37".
+    steps:
+      - stepId: newest_node
+        description: Find the newest node Linode, so replacements can be told apart.
+        operationId: get-linode-instances
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - name: X-Filter
+            in: header
+            value: '{"lke_cluster_id": {$inputs.clusterId}, "+order_by": "id", "+order": "desc"}'
+        successCriteria:
+          - condition: $statusCode == 200 && $response.body#/results > 0
+        outputs:
+          newestNodeId: $response.body#/data/0/id
+          nodeCount: $response.body#/results
+      - stepId: get_cluster
+        operationId: get-lke-cluster
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: clusterId, in: path, value: $inputs.clusterId}
+        outputs:
+          previousVersion: $response.body#/k8s_version
+        onSuccess:
+          - name: already-on-version
+            type: goto
+            stepId: recycle
+            criteria:
+              - condition: $response.body#/k8s_version == $inputs.k8sVersion
+      - stepId: set_version
+        operationId: put-lke-cluster
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: clusterId, in: path, value: $inputs.clusterId}
+        requestBody:
+          contentType: application/json
+          payload:
+            k8s_version: $inputs.k8sVersion
+      - stepId: recycle
+        operationId: post-lke-cluster-recycle
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: clusterId, in: path, value: $inputs.clusterId}
+      - stepId: wait_old_nodes_gone
+        description: Wait until no Linode from before the recycle is left in the cluster.
+        operationId: get-linode-instances
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - name: X-Filter
+            in: header
+            value: '{"lke_cluster_id": {$inputs.clusterId}, "id": {"+lte": {$steps.newest_node.outputs.newestNodeId}}}'
+        successCriteria:
+          - condition: $response.body#/results == 0
+        onFailure:
+          - name: poll
+            type: retry
+            retryAfter: 30
+            retryLimit: 120
+            criteria:
+              - condition: $statusCode == 200
+      - stepId: wait_nodes_ready
+        operationId: get-lke-cluster-pools
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: clusterId, in: path, value: $inputs.clusterId}
+        successCriteria:
+          - context: $response.body
+            condition: '^(?![\s\S]*"not_ready")'
+            type: regex
+        onFailure:
+          - name: poll
+            type: retry
+            retryAfter: 15
+            retryLimit: 80
+            criteria:
+              - condition: $statusCode == 200
+      - stepId: get_upgraded
+        operationId: get-lke-cluster
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: clusterId, in: path, value: $inputs.clusterId}
+        outputs:
+          k8sVersion: $response.body#/k8s_version
+    outputs:
+      previousVersion: $steps.get_cluster.outputs.previousVersion
+      k8sVersion: $steps.get_upgraded.outputs.k8sVersion
+      recycledNodes: $steps.newest_node.outputs.nodeCount
