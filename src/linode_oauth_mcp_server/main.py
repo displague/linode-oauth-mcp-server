@@ -26,10 +26,12 @@ from .auth import AuthManager, client_supports_url_elicitation
 from .config import Config
 from .oauth_scopes import OperationScopes
 from .openapi_annotations import annotate_openapi_component
+from .rate_limits import RetryPolicy, RetryTransport, failure_hint
 from .response_formatter import ResponseFormatter
 from .search import LinodeSearchTransform
 from .spec_manager import SpecManager
 from .tool_summaries import OAUTH_SCOPES_META, strip_schema, summarize_tools
+from .workflow_lint import Finding, lint_workflow, operation_methods
 from .workflows import (
     WORKFLOW_TOOL_PREFIX,
     build_workflow_tool,
@@ -189,6 +191,35 @@ def _component_fn(
     return annotate
 
 
+def _status_error(exc: BaseException) -> httpx2.HTTPStatusError | None:
+    """The API error response behind a failed tool call, if there is one."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, httpx2.HTTPStatusError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
+class RetryHintMiddleware(Middleware):
+    """Tell the agent whether a rate-limited or failed call is safe to retry."""
+
+    async def on_call_tool(
+        self, context: MiddlewareContext, call_next: CallNext
+    ) -> ToolResult:
+        try:
+            return await call_next(context)
+        except Exception as exc:
+            error = _status_error(exc)
+            hint = failure_hint(error.response) if error else None
+            # call_tool runs the API tool through this middleware too
+            if hint is None or hint in str(exc):
+                raise
+            raise ToolError(f"{exc}\n\n{hint}") from exc
+
+
 class ResponseFormattingMiddleware(Middleware):
     """Render structured API responses as YAML for human readability."""
 
@@ -238,10 +269,13 @@ class LinodeMCPServer:
         self.tool_catalog = tool_catalog
         self.mcp: FastMCP | None = None
         self._api_clients: list[httpx2.AsyncClient] = []
+        self.retry_policy = RetryPolicy.from_env()
         self._spec_refresh: asyncio.Task | None = None
         self._spec_version: str | None = None
         # operationId -> namespaced API tool name
         self._operation_tools: dict[str, str] = {}
+        # Steps of the loaded workflows that aren't safe to run again
+        self.workflow_findings: list[Finding] = []
 
     async def initialize(self, force_update_specs: bool = False) -> None:
         if force_update_specs or not self.spec_manager.has_all_cached_specs():
@@ -265,6 +299,7 @@ class LinodeMCPServer:
         )
         self._register_api_providers()
         self.mcp.add_middleware(SignInMiddleware(self.auth_manager))
+        self.mcp.add_middleware(RetryHintMiddleware())
         self.mcp.add_middleware(
             ResponseFormattingMiddleware(
                 self.response_formatter, list(self.config.apis)
@@ -317,12 +352,17 @@ class LinodeMCPServer:
         client = httpx2.AsyncClient(
             base_url=API_BASE_URL,
             timeout=30.0,
+            transport=RetryTransport(self._api_transport(), self.retry_policy),
             auth=LinodeAuth(self.auth_manager, operation_scopes),
             headers={"User-Agent": user_agent(self._spec_version)},
             event_hooks={"response": [record_response]},
         )
         self._api_clients.append(client)
         return client
+
+    def _api_transport(self) -> httpx2.AsyncBaseTransport:
+        """The transport API requests go out on, beneath retries; tests replace it."""
+        return httpx2.AsyncHTTPTransport()
 
     async def _register_workflows(self) -> None:
         """Add a tool for each Arazzo workflow whose operations all exist."""
@@ -348,6 +388,10 @@ class LinodeMCPServer:
                         "Skipping workflow %s: %s", workflow.workflow_id, exc
                     )
                     continue
+                methods = operation_methods(tool.step_tools)
+                for finding in lint_workflow(workflow, methods):
+                    logger.warning("Workflow %s", finding)
+                    self.workflow_findings.append(finding)
                 mcp.add_tool(tool)
 
     def _apply_catalog_transform(self) -> None:
@@ -425,6 +469,11 @@ class LinodeMCPServer:
     help="Fetch and cache a fresh Linode API spec, then exit",
 )
 @click.option(
+    "--check-workflows",
+    is_flag=True,
+    help="Check that the workflows are safe to run again, then exit",
+)
+@click.option(
     "--transport",
     type=click.Choice(["stdio", "http"], case_sensitive=False),
     default="stdio",
@@ -460,6 +509,7 @@ class LinodeMCPServer:
 def main(
     config: str | None,
     update_specs: bool,
+    check_workflows: bool,
     transport: str,
     host: str,
     port: int,
@@ -474,6 +524,13 @@ def main(
         if update_specs:
             await server.spec_manager.update_specs()
             click.echo("Linode API spec cached successfully")
+        elif check_workflows:
+            await server.initialize()
+            for finding in server.workflow_findings:
+                click.echo(str(finding))
+            if server.workflow_findings:
+                raise SystemExit(1)
+            click.echo("Workflows are safe to run again")
         else:
             await server.run(transport=transport.lower(), host=host, port=port)
 
