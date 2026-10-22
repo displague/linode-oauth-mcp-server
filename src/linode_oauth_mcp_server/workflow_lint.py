@@ -16,20 +16,30 @@ the workflow, not what its conditions mean.
 * ``break-before-make``: a step uses values read before an earlier delete.
   If the run stops in between, the deleted resource's details exist only in
   the run's state; create the replacement before deleting the original.
+
+The same analysis says where a run can stop and continue later from a
+resume token (``resume_points``): before a read step that is safe to run
+again, carrying only the values the rest of the run uses.
 """
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 
 from fastmcp.server.providers.openapi import OpenAPITool
 from fastmcp.tools.base import Tool
 
-from .workflows import Workflow, _Action, _Step
+from .workflows import ResumePoint, Workflow, _Action, _Step
 
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 IDEMPOTENT_METHODS = READ_METHODS | {"PUT", "DELETE"}
 _STEP_OUTPUT = re.compile(r"\$steps\.([A-Za-z0-9_\-]+)\.outputs\.")
 _NOT_FOUND = re.compile(r"\$statusCode\s*==\s*404\b")
+_INPUT = re.compile(r"\$inputs\.([A-Za-z0-9_\-]+)")
+_OUTPUT = re.compile(r"\$steps\.([A-Za-z0-9_\-]+)\.outputs\.([A-Za-z0-9_\-]+)")
+# Step fields that don't change what a step does
+_DOCUMENTATION = ("description", "summary")
 
 
 @dataclass(frozen=True)
@@ -61,10 +71,8 @@ def lint_workflow(workflow: Workflow, methods: dict[str, str]) -> list[Finding]:
     ``methods`` maps each step's operationId to its HTTP method.
     """
     graph = _Graph(workflow)
-    method = {s.step_id: methods[s.operation_id].upper() for s in workflow.steps}
-    reads = {
-        i for i, s in enumerate(workflow.steps) if method[s.step_id] in READ_METHODS
-    }
+    method = _methods(workflow, methods)
+    reads = _reads(workflow, method)
     findings: list[Finding] = []
 
     def finding(rule: str, step: _Step, message: str) -> None:
@@ -72,25 +80,20 @@ def lint_workflow(workflow: Workflow, methods: dict[str, str]) -> list[Finding]:
 
     for i, step in enumerate(workflow.steps):
         verb = method[step.step_id]
-        if verb not in IDEMPOTENT_METHODS and not step.replay_safe:
-            unguarded = [
-                r
-                for r in graph.resume_points_before(i, reads)
-                if r is None or not graph.bypasses(r, i)
-            ]
-            if unguarded:
-                names = ", ".join(
-                    "the start" if r is None else workflow.steps[r].step_id
-                    for r in unguarded
-                )
-                finding(
-                    "unguarded-write",
-                    step,
-                    f"{verb} {step.operation_id} runs again when the workflow is "
-                    f"repeated from {names}. Add a read step before it whose "
-                    "action skips it once it's done, or mark it x-replay-safe "
-                    "with the reason.",
-                )
+        unguarded = _unguarded(graph, i, reads, verb)
+        if unguarded:
+            names = ", ".join(
+                "the start" if r is None else workflow.steps[r].step_id
+                for r in unguarded
+            )
+            finding(
+                "unguarded-write",
+                step,
+                f"{verb} {step.operation_id} runs again when the workflow is "
+                f"repeated from {names}. Add a read step before it whose "
+                "action skips it once it's done, or mark it x-replay-safe "
+                "with the reason.",
+            )
         if verb == "DELETE" and not any(
             _NOT_FOUND.search(c.condition)
             for a in graph.failure_actions(step)
@@ -120,6 +123,90 @@ def lint_workflow(workflow: Workflow, methods: dict[str, str]) -> list[Finding]:
                         "deleting the original.",
                     )
     return findings
+
+
+def resume_points(
+    workflow: Workflow, methods: dict[str, str]
+) -> dict[str, ResumePoint]:
+    """The steps a run can safely stop before, by stepId.
+
+    Each is a read step from which every write still to come is either safe
+    to repeat or can be skipped by a read: running the rest again from there
+    after a token is used twice, or after a long gap, does no harm.
+    """
+    graph = _Graph(workflow)
+    method = _methods(workflow, methods)
+    reads = _reads(workflow, method)
+    unsafe = {
+        r
+        for i, step in enumerate(workflow.steps)
+        for r in _unguarded(graph, i, reads, method[step.step_id])
+    }
+    points: dict[str, ResumePoint] = {}
+    for i in sorted(reads - unsafe):
+        remaining = sorted({i} | graph.descendants(i))
+        text = repr(workflow.outputs) + "".join(
+            _step_text(workflow.steps[j], graph) for j in remaining
+        )
+        points[workflow.steps[i].step_id] = ResumePoint(
+            inputs=frozenset(_INPUT.findall(text)),
+            outputs=frozenset(_OUTPUT.findall(text)),
+            revision=_revision(workflow, remaining),
+        )
+    return points
+
+
+def _methods(workflow: Workflow, methods: dict[str, str]) -> dict[str, str]:
+    return {s.step_id: methods[s.operation_id].upper() for s in workflow.steps}
+
+
+def _reads(workflow: Workflow, method: dict[str, str]) -> set[int]:
+    return {
+        i for i, s in enumerate(workflow.steps) if method[s.step_id] in READ_METHODS
+    }
+
+
+def _unguarded(graph: "_Graph", i: int, reads: set[int], verb: str) -> list[int | None]:
+    """Where a run can be repeated from and run step ``i`` again unchecked."""
+    if verb in IDEMPOTENT_METHODS or graph.workflow.steps[i].replay_safe:
+        return []
+    return [
+        r
+        for r in graph.resume_points_before(i, reads)
+        if r is None or not graph.bypasses(r, i)
+    ]
+
+
+def _step_text(step: _Step, graph: "_Graph") -> str:
+    """Everything in a step that can hold a runtime expression."""
+    criteria = list(step.success) + [
+        c
+        for a in graph.success_actions(step) + graph.failure_actions(step)
+        for c in a.criteria
+    ]
+    return (
+        repr(step.parameters)
+        + repr(step.payload)
+        + repr(step.outputs)
+        + "".join(f"{c.condition} {c.context or ''}" for c in criteria)
+    )
+
+
+def _revision(workflow: Workflow, remaining: list[int]) -> str:
+    steps = workflow.steps
+    material = {
+        "steps": [
+            {k: v for k, v in steps[j].source.items() if k not in _DOCUMENTATION}
+            # The step a run falls through to matters as much as the step
+            | {"next": steps[j + 1].step_id if j + 1 < len(steps) else None}
+            for j in remaining
+        ],
+        "outputs": workflow.outputs,
+        "successActions": workflow.source.get("successActions"),
+        "failureActions": workflow.source.get("failureActions"),
+    }
+    text = json.dumps(material, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
 def _reads_response(criterion) -> bool:

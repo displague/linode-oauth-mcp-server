@@ -214,8 +214,8 @@ async def _client(monkeypatch, api, spec=SPEC, tool_catalog="full"):
     return Client(server.mcp)
 
 
-def _resize_disk_args(size=2000):
-    return {"linodeId": 1, "diskId": 5, "size": size}
+def _resize_disk_args(size=2000, **extra):
+    return {"linodeId": 1, "diskId": 5, "size": size, **extra}
 
 
 # --- Expressions and criteria ---------------------------------------------
@@ -401,7 +401,13 @@ async def test_workflow_tools_declare_step_scopes_and_annotations(monkeypatch):
     assert tool.annotations.destructive_hint is True
     assert tool.annotations.read_only_hint is False
     assert tool.title == "Resize a Linode disk"
-    assert set(tool.input_schema["required"]) == {"linodeId", "diskId", "size"}
+    # A call that continues a run passes only its resume token
+    schema = tool.input_schema
+    assert "required" not in schema
+    assert schema["properties"]["size"]["description"].endswith(
+        "Required unless resuming."
+    )
+    assert {"resume", "max_wait_s"} <= set(schema["properties"])
     # The spec has no LKE operations, so that workflow is skipped
     assert "workflow_upgrade_lke_cluster" not in tools
 
@@ -419,10 +425,8 @@ async def test_workflows_are_found_through_search(monkeypatch):
             "get_tool_schema", {"name": "workflow_move_volume"}
         )
     assert "workflow_move_volume" in text
-    assert schema.structured_content["inputSchema"]["required"] == [
-        "volumeId",
-        "linodeId",
-    ]
+    properties = schema.structured_content["inputSchema"]["properties"]
+    assert "Required unless resuming." in properties["volumeId"]["description"]
 
 
 async def test_lke_upgrade_filters_on_old_node_ids(monkeypatch, no_wait):
@@ -574,10 +578,14 @@ def test_rate_limit_wait_prefers_retry_after_then_the_poll_interval():
 
 
 async def test_rate_limit_before_any_change_fails_safely(monkeypatch, fake_clock):
+    # Waiting it out in this call fails; with a smaller max_wait_s, the call
+    # would return a resume token
     api = RateLimited("GET /linode/instances/1", 100, retry_after="60")
     async with await _client(monkeypatch, api) as client:
         result = await client.call_tool(
-            "workflow_resize_linode_disk", _resize_disk_args(), raise_on_error=False
+            "workflow_resize_linode_disk",
+            _resize_disk_args(max_wait_s=10_000),
+            raise_on_error=False,
         )
     text = result.content[0].text
     assert result.is_error
@@ -599,7 +607,9 @@ async def test_polling_step_stops_at_its_deadline(monkeypatch, fake_clock):
 
     async with await _client(monkeypatch, limit_after_shutdown) as client:
         result = await client.call_tool(
-            "workflow_resize_linode_disk", _resize_disk_args(), raise_on_error=False
+            "workflow_resize_linode_disk",
+            _resize_disk_args(max_wait_s=10_000),
+            raise_on_error=False,
         )
     text = result.content[0].text
     assert "'wait_offline' was still rate limited" in text
