@@ -31,6 +31,7 @@ from mcp_types import TextContent, ToolAnnotations
 from pydantic import PrivateAttr
 
 from .openapi_annotations import ANNOTATIONS_EXTENSION
+from .progress import Progress, progress_reporter
 from .tool_summaries import OAUTH_SCOPES_META
 
 logger = logging.getLogger(__name__)
@@ -476,7 +477,6 @@ def load_workflows(path: Path) -> list[Workflow]:
 # --- Execution -----------------------------------------------------------
 
 ToolLookup = Callable[[str], Awaitable[Tool | None]]
-Progress = Callable[[str], Awaitable[None]]
 
 
 class WorkflowFailed(Exception):
@@ -655,7 +655,7 @@ class WorkflowTool(Tool):
             if isinstance(schema, dict) and "default" in schema
         }
         inputs.update({k: v for k, v in arguments.items() if v is not None})
-        progress = await _progress_reporter()
+        progress = progress_reporter()
         try:
             outputs, trace = await run_workflow(
                 self._workflow, inputs, self._step_tools, progress
@@ -686,26 +686,6 @@ class WorkflowTool(Tool):
             allow_unicode=True,
         )
         return ToolResult(content=[TextContent(type="text", text=text)])
-
-
-async def _progress_reporter() -> Progress | None:
-    try:
-        from fastmcp.server.dependencies import get_context
-
-        ctx = get_context()
-    except Exception:
-        return None
-    count = 0
-
-    async def report(message: str) -> None:
-        nonlocal count
-        count += 1
-        try:
-            await ctx.report_progress(count, None, message)
-        except Exception:
-            logger.debug("Could not report workflow progress", exc_info=True)
-
-    return report
 
 
 async def build_workflow_tool(workflow: Workflow, lookup: ToolLookup) -> WorkflowTool:

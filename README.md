@@ -110,6 +110,10 @@ Search finds workflow tools alongside the API tools, and `get_tool_schema` descr
 
 The executor supports a subset of Arazzo 1.0: `operationId` steps, runtime expressions in parameters and request payloads, `simple` and `regex` criteria, `end`/`goto`/`retry` actions (`retry` with `retryAfter` and `retryLimit` is how a step polls), and step and workflow outputs. It rejects documents that use other features when it loads them. A workflow whose operations aren't in the cached spec is skipped at startup. To add workflows, list more Arazzo documents under `workflows:` in a config file; relative paths resolve against the config file's directory.
 
+## Rate limits and retries
+
+The server retries Linode API requests that come back rate limited (`429`) or timed out (`408`), whatever the method, because the API turned those requests away before doing anything. Gateway errors (`502`, `503`, `504`) are retried only for `GET`, `PUT`, and `DELETE`: a `POST` that hits one may already have created something, so it is not sent again. Retries wait as long as the response's `Retry-After` header asks, or back off exponentially when it gives no value. Each wait is reported to the MCP client as progress. All the waits for one request share a 15-second budget, so a tool call returns before the client gives up on it. When retries run out, the tool error says whether the request was applied and when to try again. `LINODE_MCP_RETRY_MAX` sets the number of retries (default `5`; `0` turns retries off), and `LINODE_MCP_RETRY_WAIT` sets the wait budget in seconds.
+
 ## API spec updates
 
 The default source is `https://raw.githubusercontent.com/linode/linode-api-openapi/main/openapi.json`. To change it, pass a YAML config:

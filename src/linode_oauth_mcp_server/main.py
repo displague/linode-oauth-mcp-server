@@ -26,6 +26,7 @@ from .auth import AuthManager, client_supports_url_elicitation
 from .config import Config
 from .oauth_scopes import OperationScopes
 from .openapi_annotations import annotate_openapi_component
+from .rate_limits import RetryPolicy, RetryTransport, failure_hint
 from .response_formatter import ResponseFormatter
 from .search import LinodeSearchTransform
 from .spec_manager import SpecManager
@@ -189,6 +190,35 @@ def _component_fn(
     return annotate
 
 
+def _status_error(exc: BaseException) -> httpx2.HTTPStatusError | None:
+    """The API error response behind a failed tool call, if there is one."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, httpx2.HTTPStatusError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
+class RetryHintMiddleware(Middleware):
+    """Tell the agent whether a rate-limited or failed call is safe to retry."""
+
+    async def on_call_tool(
+        self, context: MiddlewareContext, call_next: CallNext
+    ) -> ToolResult:
+        try:
+            return await call_next(context)
+        except Exception as exc:
+            error = _status_error(exc)
+            hint = failure_hint(error.response) if error else None
+            # call_tool runs the API tool through this middleware too
+            if hint is None or hint in str(exc):
+                raise
+            raise ToolError(f"{exc}\n\n{hint}") from exc
+
+
 class ResponseFormattingMiddleware(Middleware):
     """Render structured API responses as YAML for human readability."""
 
@@ -238,6 +268,7 @@ class LinodeMCPServer:
         self.tool_catalog = tool_catalog
         self.mcp: FastMCP | None = None
         self._api_clients: list[httpx2.AsyncClient] = []
+        self.retry_policy = RetryPolicy.from_env()
         self._spec_refresh: asyncio.Task | None = None
         self._spec_version: str | None = None
         # operationId -> namespaced API tool name
@@ -265,6 +296,7 @@ class LinodeMCPServer:
         )
         self._register_api_providers()
         self.mcp.add_middleware(SignInMiddleware(self.auth_manager))
+        self.mcp.add_middleware(RetryHintMiddleware())
         self.mcp.add_middleware(
             ResponseFormattingMiddleware(
                 self.response_formatter, list(self.config.apis)
@@ -317,12 +349,17 @@ class LinodeMCPServer:
         client = httpx2.AsyncClient(
             base_url=API_BASE_URL,
             timeout=30.0,
+            transport=RetryTransport(self._api_transport(), self.retry_policy),
             auth=LinodeAuth(self.auth_manager, operation_scopes),
             headers={"User-Agent": user_agent(self._spec_version)},
             event_hooks={"response": [record_response]},
         )
         self._api_clients.append(client)
         return client
+
+    def _api_transport(self) -> httpx2.AsyncBaseTransport:
+        """The transport API requests go out on, beneath retries; tests replace it."""
+        return httpx2.AsyncHTTPTransport()
 
     async def _register_workflows(self) -> None:
         """Add a tool for each Arazzo workflow whose operations all exist."""
