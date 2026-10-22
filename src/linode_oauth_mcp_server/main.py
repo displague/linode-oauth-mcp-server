@@ -31,6 +31,7 @@ from .response_formatter import ResponseFormatter
 from .search import LinodeSearchTransform
 from .spec_manager import SpecManager
 from .tool_summaries import OAUTH_SCOPES_META, strip_schema, summarize_tools
+from .workflow_lint import Finding, lint_workflow, operation_methods
 from .workflows import (
     WORKFLOW_TOOL_PREFIX,
     build_workflow_tool,
@@ -273,6 +274,8 @@ class LinodeMCPServer:
         self._spec_version: str | None = None
         # operationId -> namespaced API tool name
         self._operation_tools: dict[str, str] = {}
+        # Steps of the loaded workflows that aren't safe to run again
+        self.workflow_findings: list[Finding] = []
 
     async def initialize(self, force_update_specs: bool = False) -> None:
         if force_update_specs or not self.spec_manager.has_all_cached_specs():
@@ -385,6 +388,10 @@ class LinodeMCPServer:
                         "Skipping workflow %s: %s", workflow.workflow_id, exc
                     )
                     continue
+                methods = operation_methods(tool.step_tools)
+                for finding in lint_workflow(workflow, methods):
+                    logger.warning("Workflow %s", finding)
+                    self.workflow_findings.append(finding)
                 mcp.add_tool(tool)
 
     def _apply_catalog_transform(self) -> None:
@@ -462,6 +469,11 @@ class LinodeMCPServer:
     help="Fetch and cache a fresh Linode API spec, then exit",
 )
 @click.option(
+    "--check-workflows",
+    is_flag=True,
+    help="Check that the workflows are safe to run again, then exit",
+)
+@click.option(
     "--transport",
     type=click.Choice(["stdio", "http"], case_sensitive=False),
     default="stdio",
@@ -497,6 +509,7 @@ class LinodeMCPServer:
 def main(
     config: str | None,
     update_specs: bool,
+    check_workflows: bool,
     transport: str,
     host: str,
     port: int,
@@ -511,6 +524,13 @@ def main(
         if update_specs:
             await server.spec_manager.update_specs()
             click.echo("Linode API spec cached successfully")
+        elif check_workflows:
+            await server.initialize()
+            for finding in server.workflow_findings:
+                click.echo(str(finding))
+            if server.workflow_findings:
+                raise SystemExit(1)
+            click.echo("Workflows are safe to run again")
         else:
             await server.run(transport=transport.lower(), host=host, port=port)
 

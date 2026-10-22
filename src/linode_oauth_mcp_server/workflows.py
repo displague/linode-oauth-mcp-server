@@ -369,6 +369,8 @@ class _Step:
     outputs: dict[str, str]
     on_success: list[_Action] | None
     on_failure: list[_Action] | None
+    # Why the step is safe to run again, when nothing in the workflow shows it
+    replay_safe: str | None = None
 
     @classmethod
     def parse(cls, data: dict[str, Any]) -> "_Step":
@@ -415,6 +417,7 @@ class _Step:
                 if on_failure is None
                 else [_Action.parse(a, retry=True) for a in on_failure]
             ),
+            replay_safe=data.get("x-replay-safe"),
         )
 
 
@@ -719,6 +722,10 @@ class WorkflowTool(Tool):
     @property
     def workflow(self) -> Workflow:
         return self._workflow
+
+    @property
+    def step_tools(self) -> dict[str, Tool]:
+        return self._step_tools
 
     async def run(self, arguments: dict[str, Any]) -> ToolResult:
         inputs = {
