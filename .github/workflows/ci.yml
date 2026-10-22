@@ -61,6 +61,10 @@ jobs:
 
   lint-arazzo:
     runs-on: ubuntu-latest
+    # The action reports findings as check-run annotations
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
 
