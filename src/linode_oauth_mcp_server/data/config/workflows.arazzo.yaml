@@ -54,7 +54,7 @@ workflows:
         onSuccess:
           - name: already-offline
             type: goto
-            stepId: resize
+            stepId: check_disk
             criteria:
               - condition: $response.body#/status == 'offline'
         onFailure:
@@ -85,6 +85,19 @@ workflows:
             retryLimit: 120
             criteria:
               - condition: $statusCode == 200
+      - stepId: check_disk
+        description: Skip the resize if the disk already has the new size.
+        operationId: get-linode-disk
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: linodeId, in: path, value: $inputs.linodeId}
+          - {name: diskId, in: path, value: $inputs.diskId}
+        onSuccess:
+          - name: already-resized
+            type: goto
+            stepId: wait_disk_ready
+            criteria:
+              - condition: $response.body#/size == $inputs.size
       - stepId: resize
         description: Resize the disk.
         operationId: post-resize-disk
@@ -119,6 +132,18 @@ workflows:
             retryLimit: 180
             criteria:
               - condition: $statusCode == 200
+      - stepId: check_power
+        description: Skip booting if the Linode is already booting or running.
+        operationId: get-linode-instance
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: linodeId, in: path, value: $inputs.linodeId}
+        onSuccess:
+          - name: already-booted
+            type: goto
+            stepId: wait_running
+            criteria:
+              - condition: $response.body#/status != 'offline'
       - stepId: boot
         description: Boot the last booted configuration.
         operationId: post-boot-linode-instance
@@ -202,6 +227,11 @@ workflows:
         successCriteria:
           - condition: $response.body#/linode_id == null
         onFailure:
+          - name: already-attached
+            type: goto
+            stepId: wait_attached
+            criteria:
+              - condition: $response.body#/linode_id == $inputs.linodeId
           - name: poll
             type: retry
             retryAfter: 5
@@ -286,7 +316,7 @@ workflows:
         onSuccess:
           - name: already-on-version
             type: goto
-            stepId: recycle
+            stepId: check_recycle
             criteria:
               - condition: $response.body#/k8s_version == $inputs.k8sVersion
       - stepId: set_version
@@ -299,6 +329,20 @@ workflows:
           contentType: application/json
           payload:
             k8s_version: $inputs.k8sVersion
+      - stepId: check_recycle
+        description: Skip the recycle if nodes from before it are already being replaced.
+        operationId: get-linode-instances
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - name: X-Filter
+            in: header
+            value: '{"lke_cluster_id": {$inputs.clusterId}, "id": {"+lte": {$steps.newest_node.outputs.newestNodeId}}}'
+        onSuccess:
+          - name: recycle-started
+            type: goto
+            stepId: wait_old_nodes_gone
+            criteria:
+              - condition: $response.body#/results < $steps.newest_node.outputs.nodeCount
       - stepId: recycle
         description: Recycle every node so the nodes run the new version.
         operationId: post-lke-cluster-recycle

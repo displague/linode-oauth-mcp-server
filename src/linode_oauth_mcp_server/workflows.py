@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -32,14 +33,24 @@ from pydantic import PrivateAttr
 
 from .openapi_annotations import ANNOTATIONS_EXTENSION
 from .progress import Progress, progress_reporter
+from .rate_limits import NOT_APPLIED_STATUSES, parse_retry_after
 from .tool_summaries import OAUTH_SCOPES_META
 
 logger = logging.getLogger(__name__)
 WORKFLOW_TOOL_PREFIX = "workflow_"
 # Guards against goto cycles that never end; polling is bounded by retryLimit
+# and the step deadline
 MAX_STEP_RUNS = 1000
-# Waits between retries; tests replace it
+# Seconds a step may spend waiting out rate limits, beyond the polling time
+# its retry action allows (retryAfter × retryLimit). Linode's rate-limit
+# window is one minute.
+RATE_LIMIT_ALLOWANCE = 120.0
+# Wait for a rate-limited step when the response gives no Retry-After
+RATE_LIMIT_DEFAULT_WAIT = 5.0
+# Waits between retries and the clock deadlines are measured on; tests
+# replace them
 _sleep = asyncio.sleep
+_clock = time.monotonic
 
 # Responses received while a workflow step runs, for its criteria and outputs
 _responses: ContextVar[list[httpx2.Response] | None] = ContextVar(
@@ -358,6 +369,8 @@ class _Step:
     outputs: dict[str, str]
     on_success: list[_Action] | None
     on_failure: list[_Action] | None
+    # Why the step is safe to run again, when nothing in the workflow shows it
+    replay_safe: str | None = None
 
     @classmethod
     def parse(cls, data: dict[str, Any]) -> "_Step":
@@ -404,6 +417,7 @@ class _Step:
                 if on_failure is None
                 else [_Action.parse(a, retry=True) for a in on_failure]
             ),
+            replay_safe=data.get("x-replay-safe"),
         )
 
 
@@ -524,6 +538,8 @@ async def run_workflow(
     index = {s.step_id: i for i, s in enumerate(workflow.steps)}
     trace = _Trace()
     retries: dict[str, int] = {}
+    # When each step first ran since it last succeeded, for its deadline
+    started: dict[str, float] = {}
     changed = False
     position = 0
     for _ in range(MAX_STEP_RUNS):
@@ -535,8 +551,7 @@ async def run_workflow(
             {p["name"]: resolve(p.get("value"), scope) for p in step.parameters}
         )
         arguments.update(_drop_none(resolve(step.payload or {}, scope)))
-        if not (tool.annotations and tool.annotations.read_only_hint):
-            changed = True
+        started.setdefault(step.step_id, _clock())
         try:
             scope.response = await _call(tool, arguments)
         except ToolError:
@@ -546,6 +561,26 @@ async def run_workflow(
             logger.warning("Workflow step %s failed: %s", step.step_id, exc)
             scope.response = _Response(status=None, headers={}, body=str(exc))
         status = scope.response.status
+        if status in NOT_APPLIED_STATUSES:
+            # Rate limited or timed out: the API did nothing, so wait and
+            # send the same request again, without using up the step's retries
+            trace.add(step, status, False, note="rate limited")
+            wait = _rate_limit_wait(scope.response, step, workflow)
+            elapsed = _clock() - started[step.step_id]
+            if elapsed + wait > _step_deadline(step, workflow):
+                raise WorkflowFailed(
+                    f"Step {step.step_id!r} was still rate limited after "
+                    f"{elapsed:.0f}s; the Linode API did not apply it and asked "
+                    f"to wait {wait:.0f}s more{_detail(scope.response)}",
+                    trace,
+                    changed,
+                )
+            if progress:
+                await progress(f"{step.step_id}: rate limited; waiting {wait:.0f}s")
+            await _sleep(wait)
+            continue
+        if not (tool.annotations and tool.annotations.read_only_hint):
+            changed = True
         if step.success:
             succeeded = all(c.check(scope) for c in step.success)
         else:
@@ -554,6 +589,7 @@ async def run_workflow(
 
         if succeeded:
             retries.pop(step.step_id, None)
+            started.pop(step.step_id, None)
             scope.steps[step.step_id] = {
                 name: evaluate(expr, scope) for name, expr in step.outputs.items()
             }
@@ -571,12 +607,18 @@ async def run_workflow(
                 await progress(f"{step.step_id}: done")
             continue
 
-        actions = (
-            workflow.failure_actions if step.on_failure is None else step.on_failure
-        )
+        actions = _failure_actions(step, workflow)
         action = next((a for a in actions if a.matches(scope)), None)
         if action is not None and action.kind == "retry":
             attempt = retries.get(step.step_id, 0) + 1
+            elapsed = _clock() - started[step.step_id]
+            if elapsed + action.retry_after > _step_deadline(step, workflow):
+                raise WorkflowFailed(
+                    f"Step {step.step_id!r} did not succeed within "
+                    f"{elapsed:.0f}s{_detail(scope.response)}",
+                    trace,
+                    changed,
+                )
             if attempt <= action.retry_limit:
                 retries[step.step_id] = attempt
                 if progress:
@@ -613,15 +655,48 @@ async def run_workflow(
 class _Trace(list[str]):
     """One line per step run; repeated polls of a step fold into one line."""
 
-    def add(self, step: _Step, status: int | None, ok: bool) -> None:
+    def add(
+        self, step: _Step, status: int | None, ok: bool, note: str | None = None
+    ) -> None:
         line = f"{step.step_id}: {step.operation_id} -> {status or 'error'}"
-        line += "" if ok else " (criteria not met)"
+        if note:
+            line += f" ({note})"
+        elif not ok:
+            line += " (criteria not met)"
         if self and self._line == line:
             self._count += 1
             self[-1] = f"{line} ×{self._count}"
         else:
             self._line, self._count = line, 1
             self.append(line)
+
+
+def _failure_actions(step: _Step, workflow: Workflow) -> list[_Action]:
+    return workflow.failure_actions if step.on_failure is None else step.on_failure
+
+
+def _step_deadline(step: _Step, workflow: Workflow) -> float:
+    """Seconds a step may take, from its first run until it succeeds."""
+    polling = max(
+        (
+            a.retry_after * a.retry_limit
+            for a in _failure_actions(step, workflow)
+            if a.kind == "retry"
+        ),
+        default=0.0,
+    )
+    return polling + RATE_LIMIT_ALLOWANCE
+
+
+def _rate_limit_wait(response: _Response, step: _Step, workflow: Workflow) -> float:
+    """How long to wait before sending a rate-limited step again."""
+    asked = parse_retry_after(response.headers.get("retry-after"))
+    if asked is not None:
+        return asked
+    polls = [
+        a.retry_after for a in _failure_actions(step, workflow) if a.kind == "retry"
+    ]
+    return max(polls, default=RATE_LIMIT_DEFAULT_WAIT) or RATE_LIMIT_DEFAULT_WAIT
 
 
 def _detail(response: _Response | None) -> str:
@@ -647,6 +722,10 @@ class WorkflowTool(Tool):
     @property
     def workflow(self) -> Workflow:
         return self._workflow
+
+    @property
+    def step_tools(self) -> dict[str, Tool]:
+        return self._step_tools
 
     async def run(self, arguments: dict[str, Any]) -> ToolResult:
         inputs = {
