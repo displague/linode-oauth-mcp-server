@@ -91,6 +91,11 @@ class Config(BaseModel):
     )
     apis: dict[str, APIConfig] = Field(default_factory=dict)
     oauth: dict[str, Any] = Field(default_factory=dict)
+    workflows: list[str] = Field(
+        default_factory=list,
+        description="Arazzo documents whose workflows become tools; relative "
+        "paths resolve against the config file's directory",
+    )
 
     @classmethod
     def load(cls, config_path: str | None = None) -> "Config":
@@ -158,6 +163,11 @@ class Config(BaseModel):
 
         with open(path, "w") as f:
             yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+    def workflow_paths(self) -> list[Path]:
+        """The configured Arazzo documents as absolute paths."""
+        base = Path(self.config_path).parent if self.config_path else Path.cwd()
+        return [base / path for path in self.workflows]
 
     def get_api_names(self) -> list[str]:
         """Get list of configured API names."""

@@ -96,6 +96,20 @@ Run `codex mcp list` to confirm the registration, then restart Codex so the serv
 }
 ```
 
+## Workflows
+
+Some changes take several API calls in a set order, with waits in between. The server exposes these as `workflow_<workflowId>` tools, defined in an [Arazzo](https://spec.openapis.org/arazzo/latest.html) document (`data/config/workflows.arazzo.yaml`):
+
+| Tool | What it does |
+|---|---|
+| `workflow_resize_linode_disk` | Shuts the Linode down if it is running, resizes the disk, waits for the new size, and boots the Linode again if it was running. |
+| `workflow_move_volume` | Detaches a volume, waits for the detach to finish, attaches it to another Linode, and waits for the attachment. |
+| `workflow_upgrade_lke_cluster` | Sets an LKE cluster's Kubernetes version, recycles its nodes, and waits until every old node is replaced and all nodes are ready. |
+
+Search finds workflow tools alongside the API tools, and `get_tool_schema` describes them. Each workflow runs as one tool call that waits for its steps to finish, reports progress per step, and returns its outputs with a list of the steps it ran. Steps run through the server's own API tools, so a workflow uses the same credentials and requests the combined OAuth scopes of its steps in a single sign-in. If a step fails after an earlier step has changed something, the error says so, and the workflow is not retried automatically.
+
+The executor supports a subset of Arazzo 1.0: `operationId` steps, runtime expressions in parameters and request payloads, `simple` and `regex` criteria, `end`/`goto`/`retry` actions (`retry` with `retryAfter` and `retryLimit` is how a step polls), and step and workflow outputs. It rejects documents that use other features when it loads them. A workflow whose operations aren't in the cached spec is skipped at startup. To add workflows, list more Arazzo documents under `workflows:` in a config file; relative paths resolve against the config file's directory.
+
 ## API spec updates
 
 The default source is `https://raw.githubusercontent.com/linode/linode-api-openapi/main/openapi.json`. To change it, pass a YAML config:

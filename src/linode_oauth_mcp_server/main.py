@@ -30,6 +30,12 @@ from .response_formatter import ResponseFormatter
 from .search import LinodeSearchTransform
 from .spec_manager import SpecManager
 from .tool_summaries import OAUTH_SCOPES_META, strip_schema, summarize_tools
+from .workflows import (
+    WORKFLOW_TOOL_PREFIX,
+    build_workflow_tool,
+    load_workflows,
+    record_response,
+)
 
 logger = logging.getLogger(__name__)
 CATALOG_CACHE_TTL_SECONDS = 3600
@@ -158,13 +164,21 @@ class SignInMiddleware(Middleware):
         return frozenset((getattr(tool, "meta", None) or {}).get(OAUTH_SCOPES_META, ()))
 
 
-def _component_fn(operation_scopes: OperationScopes):
-    """Annotate API tools and record each operation's required OAuth scopes."""
+def _component_fn(
+    operation_scopes: OperationScopes, tool_names: dict[str, str] | None = None
+):
+    """Annotate API tools and record each operation's required OAuth scopes.
+
+    ``tool_names`` collects each operationId's tool name (before the
+    namespace prefix), so workflows can find the tool for an operation.
+    """
 
     def annotate(route, component) -> None:
         annotate_openapi_component(route, component)
         if not isinstance(component, OpenAPITool):
             return
+        if tool_names is not None and route.operation_id:
+            tool_names[route.operation_id] = component.name
         requirement = operation_scopes.requirement(route.method, route.path)
         if requirement is not None and requirement.scopes:
             component.meta = {
@@ -226,6 +240,8 @@ class LinodeMCPServer:
         self._api_clients: list[httpx2.AsyncClient] = []
         self._spec_refresh: asyncio.Task | None = None
         self._spec_version: str | None = None
+        # operationId -> namespaced API tool name
+        self._operation_tools: dict[str, str] = {}
 
     async def initialize(self, force_update_specs: bool = False) -> None:
         if force_update_specs or not self.spec_manager.has_all_cached_specs():
@@ -254,6 +270,7 @@ class LinodeMCPServer:
                 self.response_formatter, list(self.config.apis)
             )
         )
+        await self._register_workflows()
         self._apply_catalog_transform()
 
     async def _refresh_specs(self) -> None:
@@ -278,14 +295,18 @@ class LinodeMCPServer:
                 continue
             try:
                 operation_scopes = OperationScopes(spec)
+                names: dict[str, str] = {}
                 self._spec_version = (spec.get("info") or {}).get("version")
                 provider = OpenAPIProvider(
                     openapi_spec=spec,
                     client=self._build_api_client(operation_scopes),
                     tags={"linode", *api_config.tags},
-                    mcp_component_fn=_component_fn(operation_scopes),
+                    mcp_component_fn=_component_fn(operation_scopes, names),
                 )
                 self.mcp.add_provider(provider, namespace=api_name)
+                self._operation_tools.update(
+                    {op: f"{api_name}_{name}" for op, name in names.items()}
+                )
             except Exception as exc:
                 logger.exception("Failed to build Linode API provider")
                 self.failed_providers[api_name] = str(exc)
@@ -298,9 +319,36 @@ class LinodeMCPServer:
             timeout=30.0,
             auth=LinodeAuth(self.auth_manager, operation_scopes),
             headers={"User-Agent": user_agent(self._spec_version)},
+            event_hooks={"response": [record_response]},
         )
         self._api_clients.append(client)
         return client
+
+    async def _register_workflows(self) -> None:
+        """Add a tool for each Arazzo workflow whose operations all exist."""
+        assert self.mcp is not None
+        mcp = self.mcp
+
+        async def lookup(operation_id: str):
+            name = self._operation_tools.get(operation_id)
+            return await mcp.get_tool(name) if name else None
+
+        for path in self.config.workflow_paths():
+            try:
+                workflows = load_workflows(path)
+            except Exception:
+                logger.exception("Could not load Arazzo workflows from %s", path)
+                continue
+            for workflow in workflows:
+                try:
+                    tool = await build_workflow_tool(workflow, lookup)
+                except Exception as exc:
+                    # Usually an operation renamed or removed in a newer spec
+                    logger.warning(
+                        "Skipping workflow %s: %s", workflow.workflow_id, exc
+                    )
+                    continue
+                mcp.add_tool(tool)
 
     def _apply_catalog_transform(self) -> None:
         assert self.mcp is not None
@@ -344,7 +392,7 @@ class LinodeMCPServer:
             before calling a tool whose nested parameters need more detail.
             """
             tool = await mcp.get_tool(name)
-            if tool is None or not name.startswith("linode_"):
+            if tool is None or not name.startswith(("linode_", WORKFLOW_TOOL_PREFIX)):
                 raise ToolError(f"Unknown Linode API tool: {name!r}")
             return {
                 "name": tool.name,
