@@ -492,3 +492,111 @@ async def test_lke_upgrade_filters_on_old_node_ids(monkeypatch, no_wait):
     }
     assert filters[0] == {"lke_cluster_id": 7, "+order_by": "id", "+order": "desc"}
     assert filters[1] == {"lke_cluster_id": 7, "id": {"+lte": 300}}
+
+
+# --- Rate limits and deadlines ------------------------------------------
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    """Sleeps return at once but move the workflow's clock forward."""
+    now = [0.0]
+    waits: list[float] = []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(workflows, "_sleep", sleep)
+    monkeypatch.setattr(workflows, "_clock", lambda: now[0])
+    return waits
+
+
+class RateLimited(FakeLinode):
+    """Rate limit the first ``count`` requests matching ``call``."""
+
+    def __init__(self, call, count, retry_after="7", **kwargs):
+        super().__init__(**kwargs)
+        self.limited_call, self.remaining, self.retry_after = call, count, retry_after
+
+    def __call__(self, request):
+        call = f"{request.method} {request.url.path.removeprefix('/v4')}"
+        if call == self.limited_call and self.remaining > 0:
+            self.remaining -= 1
+            self.calls.append(f"{call} (429)")
+            headers = {"Retry-After": self.retry_after} if self.retry_after else {}
+            return httpx2.Response(
+                429, headers=headers, json={"errors": [{"reason": "Too many"}]}
+            )
+        return super().__call__(request)
+
+
+async def test_rate_limited_poll_waits_and_polls_again(monkeypatch, fake_clock):
+    api = RateLimited("GET /linode/instances/1/disks/5", 2)
+    async with await _client(monkeypatch, api) as client:
+        result = await client.call_tool(
+            "workflow_resize_linode_disk", _resize_disk_args()
+        )
+    body = yaml.safe_load(result.content[0].text)
+    assert body["outputs"] == {"initialStatus": "running", "size": 2000}
+    assert fake_clock.count(7.0) == 2
+    assert any("(rate limited) ×2" in line for line in body["steps"])
+
+
+async def test_rate_limited_mutation_is_sent_again(monkeypatch, fake_clock):
+    api = RateLimited("POST /linode/instances/1/shutdown", 1)
+    async with await _client(monkeypatch, api) as client:
+        await client.call_tool("workflow_resize_linode_disk", _resize_disk_args())
+    assert api.calls.count("POST /linode/instances/1/shutdown (429)") == 1
+    assert api.calls.count("POST /linode/instances/1/shutdown") == 1
+    assert api.status == "running"
+
+
+def test_rate_limit_wait_prefers_retry_after_then_the_poll_interval():
+    resize = load_workflows(Config.load().workflow_paths()[0])[0]
+    steps = {s.step_id: s for s in resize.steps}
+
+    def wait(step, headers):
+        response = _Response(status=429, headers=headers, body=None)
+        return workflows._rate_limit_wait(response, steps[step], resize)
+
+    assert wait("wait_disk_ready", {"retry-after": "3"}) == 3
+    # wait_disk_ready polls every 10 seconds
+    assert wait("wait_disk_ready", {}) == 10
+    # shut_down doesn't poll
+    assert wait("shut_down", {}) == workflows.RATE_LIMIT_DEFAULT_WAIT
+
+
+async def test_rate_limit_before_any_change_fails_safely(monkeypatch, fake_clock):
+    api = RateLimited("GET /linode/instances/1", 100, retry_after="60")
+    async with await _client(monkeypatch, api) as client:
+        result = await client.call_tool(
+            "workflow_resize_linode_disk", _resize_disk_args(), raise_on_error=False
+        )
+    text = result.content[0].text
+    assert result.is_error
+    assert "'check_status' was still rate limited" in text
+    assert "did not apply it" in text
+    assert "Earlier steps changed" not in text
+
+
+async def test_polling_step_stops_at_its_deadline(monkeypatch, fake_clock):
+    # Rate limits use up wait_offline's time before its retries run out
+    api = RateLimited("GET /linode/instances/1", 1000, retry_after="59")
+    api.remaining = 0
+    shutdown = api.__class__.__call__
+
+    def limit_after_shutdown(request):
+        if request.method == "POST" and request.url.path.endswith("/shutdown"):
+            api.remaining = 1000
+        return shutdown(api, request)
+
+    async with await _client(monkeypatch, limit_after_shutdown) as client:
+        result = await client.call_tool(
+            "workflow_resize_linode_disk", _resize_disk_args(), raise_on_error=False
+        )
+    text = result.content[0].text
+    assert "'wait_offline' was still rate limited" in text
+    assert "Earlier steps changed resources" in text
+    # wait_offline allows 5s × 120 polls plus the rate-limit allowance
+    assert sum(fake_clock) <= 5 * 120 + workflows.RATE_LIMIT_ALLOWANCE

@@ -73,7 +73,11 @@ class RetryOutcome:
 
 def retry_after(response: httpx2.Response) -> float | None:
     """Seconds the ``Retry-After`` header asks for, if it gives a usable value."""
-    value = response.headers.get("Retry-After")
+    return parse_retry_after(response.headers.get("Retry-After"))
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """Seconds a ``Retry-After`` value (seconds or an HTTP date) asks for."""
     if not value:
         return None
     try:
