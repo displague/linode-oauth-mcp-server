@@ -5,6 +5,7 @@
 arazzo: 1.0.1
 info:
   title: Linode workflows
+  summary: Multi-step Linode operations with the ordering and waits they need.
   version: 1.0.0
   description: >-
     Guided Linode API operations that power-cycle, detach or recycle
@@ -64,11 +65,13 @@ workflows:
             criteria:
               - condition: $statusCode == 200
       - stepId: shut_down
+        description: Shut the Linode down.
         operationId: post-shutdown-linode-instance
         parameters:
           - {name: apiVersion, in: path, value: v4}
           - {name: linodeId, in: path, value: $inputs.linodeId}
       - stepId: wait_offline
+        description: Wait until the Linode is offline.
         operationId: get-linode-instance
         parameters:
           - {name: apiVersion, in: path, value: v4}
@@ -83,6 +86,7 @@ workflows:
             criteria:
               - condition: $statusCode == 200
       - stepId: resize
+        description: Resize the disk.
         operationId: post-resize-disk
         parameters:
           - {name: apiVersion, in: path, value: v4}
@@ -122,6 +126,7 @@ workflows:
           - {name: apiVersion, in: path, value: v4}
           - {name: linodeId, in: path, value: $inputs.linodeId}
       - stepId: wait_running
+        description: Wait until the Linode is running.
         operationId: get-linode-instance
         parameters:
           - {name: apiVersion, in: path, value: v4}
@@ -165,6 +170,7 @@ workflows:
             Defaults to its last booted configuration.
     steps:
       - stepId: get_volume
+        description: Find where the volume is attached.
         operationId: get-volume
         parameters:
           - {name: apiVersion, in: path, value: v4}
@@ -182,11 +188,13 @@ workflows:
             criteria:
               - condition: $response.body#/linode_id == null
       - stepId: detach
+        description: Detach the volume from its current Linode.
         operationId: post-detach-volume
         parameters:
           - {name: apiVersion, in: path, value: v4}
           - {name: volumeId, in: path, value: $inputs.volumeId}
       - stepId: wait_detached
+        description: Wait until the volume is detached.
         operationId: get-volume
         parameters:
           - {name: apiVersion, in: path, value: v4}
@@ -201,6 +209,7 @@ workflows:
             criteria:
               - condition: $statusCode == 200
       - stepId: attach
+        description: Attach the volume to the target Linode.
         operationId: post-attach-volume
         parameters:
           - {name: apiVersion, in: path, value: v4}
@@ -211,6 +220,7 @@ workflows:
             linode_id: $inputs.linodeId
             config_id: $inputs.configId
       - stepId: wait_attached
+        description: Wait until the volume is attached and active.
         operationId: get-volume
         parameters:
           - {name: apiVersion, in: path, value: v4}
@@ -266,6 +276,7 @@ workflows:
           newestNodeId: $response.body#/data/0/id
           nodeCount: $response.body#/results
       - stepId: get_cluster
+        description: Read the cluster's current Kubernetes version.
         operationId: get-lke-cluster
         parameters:
           - {name: apiVersion, in: path, value: v4}
@@ -279,6 +290,7 @@ workflows:
             criteria:
               - condition: $response.body#/k8s_version == $inputs.k8sVersion
       - stepId: set_version
+        description: Set the new Kubernetes version.
         operationId: put-lke-cluster
         parameters:
           - {name: apiVersion, in: path, value: v4}
@@ -288,6 +300,7 @@ workflows:
           payload:
             k8s_version: $inputs.k8sVersion
       - stepId: recycle
+        description: Recycle every node so the nodes run the new version.
         operationId: post-lke-cluster-recycle
         parameters:
           - {name: apiVersion, in: path, value: v4}
@@ -310,6 +323,7 @@ workflows:
             criteria:
               - condition: $statusCode == 200
       - stepId: wait_nodes_ready
+        description: Wait until no pool node is not_ready.
         operationId: get-lke-cluster-pools
         parameters:
           - {name: apiVersion, in: path, value: v4}
@@ -326,6 +340,7 @@ workflows:
             criteria:
               - condition: $statusCode == 200
       - stepId: get_upgraded
+        description: Read the cluster's Kubernetes version after the upgrade.
         operationId: get-lke-cluster
         parameters:
           - {name: apiVersion, in: path, value: v4}
