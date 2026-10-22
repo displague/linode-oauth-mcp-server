@@ -452,7 +452,7 @@ async def test_lke_upgrade_filters_on_old_node_ids(monkeypatch, no_wait):
             },
         }
     )
-    state = {"version": "1.36", "old_nodes": 2, "pool": "not_ready"}
+    state = {"version": "1.36", "old_nodes": 2, "pool": "not_ready", "recycles": 0}
     filters = []
 
     def api(request):
@@ -461,13 +461,18 @@ async def test_lke_upgrade_filters_on_old_node_ids(monkeypatch, no_wait):
             query = json.loads(request.headers["X-Filter"])
             filters.append(query)
             if "id" in query:
-                state["old_nodes"] = max(state["old_nodes"] - 1, 0)
+                # Old nodes are replaced one per poll once the recycle starts
+                if state["recycles"]:
+                    state["old_nodes"] = max(state["old_nodes"] - 1, 0)
                 return httpx2.Response(
                     200, json={"data": [], "results": state["old_nodes"]}
                 )
             return httpx2.Response(
                 200, json={"data": [{"id": 300}, {"id": 200}], "results": 2}
             )
+        if path == "/lke/clusters/7/recycle":
+            state["recycles"] += 1
+            return httpx2.Response(200, json={})
         if path == "/lke/clusters/7" and request.method == "PUT":
             state["version"] = json.loads(request.content)["k8s_version"]
         if path == "/lke/clusters/7":
@@ -492,6 +497,7 @@ async def test_lke_upgrade_filters_on_old_node_ids(monkeypatch, no_wait):
     }
     assert filters[0] == {"lke_cluster_id": 7, "+order_by": "id", "+order": "desc"}
     assert filters[1] == {"lke_cluster_id": 7, "id": {"+lte": 300}}
+    assert state["recycles"] == 1
 
 
 # --- Rate limits and deadlines ------------------------------------------
@@ -600,3 +606,78 @@ async def test_polling_step_stops_at_its_deadline(monkeypatch, fake_clock):
     assert "Earlier steps changed resources" in text
     # wait_offline allows 5s × 120 polls plus the rate-limit allowance
     assert sum(fake_clock) <= 5 * 120 + workflows.RATE_LIMIT_ALLOWANCE
+
+
+# --- Running again ---------------------------------------------------------
+
+
+async def test_resize_skips_a_disk_already_at_the_new_size(monkeypatch, no_wait):
+    api = FakeLinode(status="offline")
+    api.disk["size"] = 2000
+    async with await _client(monkeypatch, api) as client:
+        result = await client.call_tool(
+            "workflow_resize_linode_disk", _resize_disk_args()
+        )
+    assert not [c for c in api.calls if c.startswith("POST")]
+    assert yaml.safe_load(result.content[0].text)["outputs"]["size"] == 2000
+
+
+async def test_resize_doesnt_boot_a_linode_that_is_already_up(monkeypatch, no_wait):
+    api = FakeLinode()
+    resize = api.__class__.__call__
+
+    def booted_by_someone_else(request):
+        response = resize(api, request)
+        if request.url.path.endswith("/resize"):
+            # Someone boots the Linode while the disk resizes
+            api.later(1, lambda: setattr(api, "status", "running"))
+        return response
+
+    async with await _client(monkeypatch, booted_by_someone_else) as client:
+        await client.call_tool("workflow_resize_linode_disk", _resize_disk_args())
+    assert "POST /linode/instances/1/boot" not in api.calls
+
+
+UNGUARDED = """
+arazzo: 1.0.1
+info: {title: t, version: 1.0.0}
+sourceDescriptions: [{name: linode, url: https://example.com, type: openapi}]
+workflows:
+  - workflowId: boot-twice
+    steps:
+      - stepId: boot
+        operationId: post-boot-linode-instance
+        parameters:
+          - {name: apiVersion, in: path, value: v4}
+          - {name: linodeId, in: path, value: 1}
+"""
+
+
+async def test_startup_records_unsafe_workflow_steps(monkeypatch, tmp_path):
+    monkeypatch.setenv("LINODE_API_TOKEN", "pat")
+    config = yaml.safe_load(Config.load().model_dump_json())
+    config["workflows"] = ["unguarded.arazzo.yaml"]
+    (tmp_path / "unguarded.arazzo.yaml").write_text(UNGUARDED)
+    (tmp_path / "apis.yaml").write_text(yaml.dump(config))
+
+    class TestServer(LinodeMCPServer):
+        def _api_transport(self):
+            return httpx2.MockTransport(FakeLinode())
+
+        async def _refresh_specs(self):
+            pass
+
+    server = TestServer(config_path=str(tmp_path / "apis.yaml"))
+    server.spec_manager.save_merged_spec("linode", SPEC)
+    await server.initialize()
+    assert [(f.rule, f.step_id) for f in server.workflow_findings] == [
+        ("unguarded-write", "boot")
+    ]
+    # The workflow is still offered; the check only warns
+    assert await server.mcp.get_tool("workflow_boot_twice") is not None
+
+
+async def test_packaged_workflows_pass_the_startup_check(monkeypatch, caplog):
+    async with await _client(monkeypatch, FakeLinode()) as client:
+        await client.list_tools()
+    assert "unguarded-write" not in caplog.text
