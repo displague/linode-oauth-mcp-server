@@ -2,6 +2,7 @@
 
 import asyncio
 import socket
+import time
 import urllib.parse
 
 import httpx2
@@ -74,6 +75,8 @@ def server(monkeypatch):
 
     def api(request):
         seen.append((request.url.path, request.headers.get("Authorization")))
+        if request.headers.get("Authorization") == "Bearer revoked":
+            return httpx2.Response(401, json={"errors": [{"reason": "Invalid Token"}]})
         return httpx2.Response(200, json={"ok": True})
 
     scopes = OperationScopes(SPEC)
@@ -166,6 +169,46 @@ async def test_public_operation_needs_no_sign_in(server):
         )
     assert elicitations == []
     assert seen == [("/v4/regions", None)]
+
+
+def _use_token(auth, token, static=False):
+    auth.token = token
+    auth._static_token = static
+    auth._expires_at = time.time() + 3600
+    auth.granted_scopes = frozenset({"account:read_only"})
+
+
+async def test_rejected_oauth_token_signs_in_again_and_retries(server):
+    mcp, auth, port, seen = server
+    _use_token(auth, "revoked")
+    elicitations = []
+    async with Client(mcp, elicitation_handler=_browser(port, elicitations)) as client:
+        result = await client.call_tool(
+            "call_tool", {"name": "linode_get_account", "arguments": {}}
+        )
+    assert not result.is_error
+    assert len(elicitations) == 1
+    assert seen == [
+        ("/v4/account", "Bearer revoked"),
+        ("/v4/account", "Bearer oauth-token"),
+    ]
+
+
+async def test_rejected_static_token_is_returned_without_sign_in(server):
+    mcp, auth, port, seen = server
+    _use_token(auth, "revoked", static=True)
+    elicitations = []
+    async with Client(mcp, elicitation_handler=_browser(port, elicitations)) as client:
+        result = await client.call_tool(
+            "call_tool",
+            {"name": "linode_get_account", "arguments": {}},
+            raise_on_error=False,
+        )
+    assert result.is_error
+    assert "401" in result.content[0].text
+    assert elicitations == []
+    assert seen == [("/v4/account", "Bearer revoked")]
+    assert auth.token == "revoked"
 
 
 async def test_filter_is_sent_as_header_on_list_operations(monkeypatch, temp_dir):

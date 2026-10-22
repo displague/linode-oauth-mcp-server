@@ -361,6 +361,17 @@ class AuthManager:
         self._static_token = False
         _token_path().unlink(missing_ok=True)
 
+    def token_rejected(self, token: str) -> None:
+        """Drop an OAuth token the API answered 401 to, so the next call signs in.
+
+        Tokens from the environment or linode-cli are kept: a new sign-in
+        can't fix them. A token already replaced by a newer sign-in is kept too.
+        """
+        if self._static_token or token != self.token:
+            return
+        logger.info("Linode rejected the OAuth token; it was revoked or expired")
+        self.clear_token_cache()
+
     def _load_saved_token(self) -> None:
         """Resume an unexpired OAuth token saved by an earlier server process."""
         path = _token_path()

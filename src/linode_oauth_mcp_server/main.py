@@ -70,7 +70,10 @@ class LinodeAuth(httpx2.Auth):
         ):
             scopes = requirement.scopes if requirement else frozenset()
             request.headers.update(await self._auth_manager.get_auth_header(scopes))
-        yield request
+        response = yield request
+        sent = request.headers.get("Authorization", "")
+        if response.status_code == 401 and sent.startswith("Bearer "):
+            self._auth_manager.token_rejected(sent.removeprefix("Bearer "))
 
 
 def _target_tool_name(context: MiddlewareContext) -> str:
@@ -90,6 +93,9 @@ class SignInMiddleware(Middleware):
     carrying a URL elicitation; the client shows the link and retries the call,
     which then waits for the sign-in callback. Older clients fall through to
     the auth flow, which pushes the elicitation or opens the system browser.
+
+    When the API rejects an OAuth token (revoked, or expired early), the auth
+    flow drops it and the call is retried once through a new sign-in.
     """
 
     def __init__(self, auth_manager: AuthManager):
@@ -99,6 +105,15 @@ class SignInMiddleware(Middleware):
         self, context: MiddlewareContext, call_next: CallNext
     ) -> ToolResult:
         ctx = context.fastmcp_context
+        scopes = await self._required_scopes(ctx, context) if ctx else frozenset()
+        if not (scopes and self._auth_manager.needs_sign_in(scopes)):
+            try:
+                return await call_next(context)
+            except Exception:
+                if not (scopes and self._auth_manager.needs_sign_in(scopes)):
+                    raise
+                logger.info("Signing in again to retry the rejected call")
+
         request_context = ctx.request_context if ctx else None
         if (
             ctx is None
@@ -106,9 +121,6 @@ class SignInMiddleware(Middleware):
             or request_context.protocol_version not in MODERN_PROTOCOL_VERSIONS
             or not client_supports_url_elicitation(ctx.session)
         ):
-            return await call_next(context)
-        scopes = await self._required_scopes(ctx, context)
-        if not scopes or not self._auth_manager.needs_sign_in(scopes):
             return await call_next(context)
 
         sign_in = await self._auth_manager.begin_sign_in(scopes)
