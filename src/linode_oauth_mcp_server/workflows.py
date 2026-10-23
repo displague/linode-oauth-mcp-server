@@ -577,6 +577,8 @@ class RunResult:
     paused: Checkpoint | None = None
     # Seconds the run was about to wait when it paused
     retry_after: float = 0.0
+    # Whether it paused because the sign-in expired
+    sign_in: bool = False
 
 
 async def run_workflow(
@@ -588,12 +590,18 @@ async def run_workflow(
     start: Checkpoint | None = None,
     max_wait: float | None = None,
     pause_before: frozenset[str] = frozenset(),
+    sign_in_needed: Callable[[], bool] | None = None,
 ) -> RunResult:
     """Run a workflow, or the rest of one from ``start``.
 
     With ``max_wait``, a run that would wait past that many seconds since it
     began pauses instead, before the next step it would run, if that step is
     in ``pause_before``; otherwise it keeps waiting.
+
+    When ``sign_in_needed`` says the sign-in no longer covers the workflow
+    (it expired, or the API rejected it), the run also pauses before a step
+    in ``pause_before``, so the next call signs in before it continues.
+    Signing in partway through a call can't show the client a prompt.
     """
     began = _clock()
     index = {s.step_id: i for i, s in enumerate(workflow.steps)}
@@ -611,21 +619,39 @@ async def run_workflow(
     # When each step first ran since it last succeeded, for its deadline
     started: dict[str, float] = {}
 
-    def pause(at: int, wait: float) -> RunResult | None:
+    # Steps run in this call
+    ran = 0
+
+    def checkpoint(at: int) -> Checkpoint:
         step_id = workflow.steps[at].step_id
+        return Checkpoint(step_id, scope.inputs, scope.steps, retries, changed)
+
+    def pause(at: int, wait: float) -> RunResult | None:
         if (
             max_wait is None
             or _clock() - began + wait <= max_wait
-            or step_id not in pause_before
+            or workflow.steps[at].step_id not in pause_before
         ):
             return None
-        checkpoint = Checkpoint(step_id, scope.inputs, scope.steps, retries, changed)
-        return RunResult(list(trace), paused=checkpoint, retry_after=wait)
+        return RunResult(list(trace), paused=checkpoint(at), retry_after=wait)
+
+    def pause_to_sign_in(at: int) -> RunResult | None:
+        if (
+            sign_in_needed is None
+            or workflow.steps[at].step_id not in pause_before
+            or not sign_in_needed()
+        ):
+            return None
+        return RunResult(list(trace), paused=checkpoint(at), sign_in=True)
 
     for _ in range(MAX_STEP_RUNS):
         if position >= len(workflow.steps):
             break
         step = workflow.steps[position]
+        # A call starts signed in; a client that can't be asked to sign in
+        # before a call signs in during its first step
+        if ran and (paused := pause_to_sign_in(position)):
+            return paused
         tool = tools[step.operation_id]
         arguments = _drop_none(
             {p["name"]: resolve(p.get("value"), scope) for p in step.parameters}
@@ -641,6 +667,13 @@ async def run_workflow(
             logger.warning("Workflow step %s failed: %s", step.step_id, exc)
             scope.response = _Response(status=None, headers={}, body=str(exc))
         status = scope.response.status
+        ran += 1
+        if status == 401 and (ran > 1 or changed):
+            # The sign-in expired or was revoked, and the API did nothing
+            if paused := pause_to_sign_in(position):
+                trace.add(step, status, False, note="signed out")
+                paused.trace = list(trace)
+                return paused
         if status in NOT_APPLIED_STATUSES:
             # Rate limited or timed out: the API did nothing, so wait and
             # send the same request again, without using up the step's retries
@@ -803,6 +836,7 @@ class WorkflowTool(Tool):
     _workflow: Workflow = PrivateAttr()
     _step_tools: dict[str, Tool] = PrivateAttr()
     _resume_points: dict[str, ResumePoint] = PrivateAttr()
+    _needs_sign_in: Callable[[frozenset[str]], bool] | None = PrivateAttr(default=None)
 
     @property
     def workflow(self) -> Workflow:
@@ -863,6 +897,7 @@ class WorkflowTool(Tool):
                 start=start,
                 max_wait=max_wait,
                 pause_before=frozenset(self._resume_points),
+                sign_in_needed=self._sign_in_check(),
             )
         except WorkflowFailed as exc:
             message = f"{exc}\n\nSteps run:\n" + "\n".join(
@@ -888,6 +923,14 @@ class WorkflowTool(Tool):
         return _text_result(
             {"status": "completed", "outputs": result.outputs, "steps": result.trace}
         )
+
+    def _sign_in_check(self) -> Callable[[], bool] | None:
+        """Whether the sign-in still covers every step's scopes."""
+        needs_sign_in = self._needs_sign_in
+        if needs_sign_in is None:
+            return None
+        scopes = frozenset((self.meta or {}).get(OAUTH_SCOPES_META, ()))
+        return lambda: needs_sign_in(scopes)
 
     def _checkpoint(self, token: str) -> Checkpoint:
         """The checkpoint a resume token holds, if it's still good to use."""
@@ -950,15 +993,23 @@ class WorkflowTool(Tool):
             resume.signing_key(),
         )
         wait = math.ceil(result.retry_after)
+        if result.sign_in:
+            message = (
+                "The Linode sign-in expired. Call {name} again with only "
+                "{arg} set to the token below; that call asks you to sign in, "
+                "then continues."
+            )
+        else:
+            message = (
+                "Still running. To continue, call {name} again in about {wait} "
+                "seconds with only {arg} set to the token below."
+            )
         return {
             "status": "working",
             "next": checkpoint.step_id,
             "retry_after_s": wait,
-            "message": (
-                f"Still running. To continue, call {self.name} again in about "
-                f"{wait} seconds with only {RESUME_ARGUMENT} set to the token "
-                "below. The token holds the inputs and progress so far."
-            ),
+            "message": message.format(name=self.name, arg=RESUME_ARGUMENT, wait=wait)
+            + " The token holds the inputs and progress so far.",
             "carried": carried,
             RESUME_ARGUMENT: token,
             "steps": result.trace,
@@ -982,8 +1033,16 @@ def default_max_wait() -> float:
         return DEFAULT_MAX_WAIT
 
 
-async def build_workflow_tool(workflow: Workflow, lookup: ToolLookup) -> WorkflowTool:
-    """Resolve a workflow's operations to API tools and wrap it as a tool."""
+async def build_workflow_tool(
+    workflow: Workflow,
+    lookup: ToolLookup,
+    needs_sign_in: Callable[[frozenset[str]], bool] | None = None,
+) -> WorkflowTool:
+    """Resolve a workflow's operations to API tools and wrap it as a tool.
+
+    ``needs_sign_in`` says whether the current sign-in lacks some scopes; a
+    run that finds it does pauses rather than signing in partway through.
+    """
     # workflow_lint imports this module
     from .workflow_lint import operation_methods, resume_points
 
@@ -1046,6 +1105,7 @@ async def build_workflow_tool(workflow: Workflow, lookup: ToolLookup) -> Workflo
     tool._workflow = workflow
     tool._step_tools = step_tools
     tool._resume_points = resume_points(workflow, operation_methods(step_tools))
+    tool._needs_sign_in = needs_sign_in
     return tool
 
 

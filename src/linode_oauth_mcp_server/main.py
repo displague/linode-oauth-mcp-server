@@ -80,8 +80,15 @@ class LinodeAuth(httpx2.Auth):
             request.headers.update(await self._auth_manager.get_auth_header(scopes))
         response = yield request
         sent = request.headers.get("Authorization", "")
-        if response.status_code == 401 and sent.startswith("Bearer "):
-            self._auth_manager.token_rejected(sent.removeprefix("Bearer "))
+        if not sent.startswith("Bearer "):
+            return
+        token = sent.removeprefix("Bearer ")
+        if response.status_code == 401:
+            self._auth_manager.token_rejected(token)
+        else:
+            self._auth_manager.scopes_reported(
+                token, response.headers.get("X-OAuth-Scopes")
+            )
 
 
 def _target_tool_name(context: MiddlewareContext) -> str:
@@ -381,7 +388,11 @@ class LinodeMCPServer:
                 continue
             for workflow in workflows:
                 try:
-                    tool = await build_workflow_tool(workflow, lookup)
+                    tool = await build_workflow_tool(
+                        workflow,
+                        lookup,
+                        lambda scopes: self.auth_manager.needs_sign_in(scopes),
+                    )
                 except Exception as exc:
                     # Usually an operation renamed or removed in a newer spec
                     logger.warning(

@@ -266,3 +266,35 @@ async def test_filter_is_sent_as_header_on_list_operations(monkeypatch, temp_dir
             {"apiVersion": "v4", "X-Filter": '{"mine": true}'},
         )
     assert seen == [("/v4/linode/stackscripts", '{"mine": true}')]
+
+
+async def _get_account(auth, headers):
+    """Call the API once through the auth flow, answering with ``headers``."""
+    client = httpx2.AsyncClient(
+        base_url="https://api.linode.com",
+        transport=httpx2.MockTransport(
+            lambda request: httpx2.Response(200, headers=headers, json={})
+        ),
+        auth=LinodeAuth(auth, OperationScopes(SPEC)),
+    )
+    async with client:
+        await client.get("/v4/account")
+
+
+async def test_scopes_the_api_reports_replace_assumed_ones(server):
+    _, auth, *_ = server
+    # The sign-in redirect left scopes out, so the request was assumed granted
+    _use_token(auth, "oauth-token")
+    auth.granted_scopes = frozenset({"account:read_write", "linodes:read_only"})
+    await _get_account(auth, {"X-OAuth-Scopes": "account:read_only"})
+    assert auth.granted_scopes == {"account:read_only"}
+    assert auth.needs_sign_in(frozenset({"account:read_write"}))
+    # A later server process loads the corrected scopes
+    assert AuthManager().granted_scopes == {"account:read_only"}
+
+
+async def test_reported_scopes_are_ignored_for_static_tokens(server):
+    _, auth, *_ = server
+    _use_token(auth, "pat", static=True)
+    await _get_account(auth, {"X-OAuth-Scopes": "linodes:read_only"})
+    assert auth.granted_scopes == {"account:read_only"}
