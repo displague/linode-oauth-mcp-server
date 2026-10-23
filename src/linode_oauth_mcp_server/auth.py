@@ -372,6 +372,22 @@ class AuthManager:
         logger.info("Linode rejected the OAuth token; it was revoked or expired")
         self.clear_token_cache()
 
+    def scopes_reported(self, token: str, header: str | None) -> None:
+        """Record the scopes the API says an OAuth token has.
+
+        Linode sends them in ``X-OAuth-Scopes`` on every response. The sign-in
+        redirect may leave them out, and the user may grant less than was
+        asked for, so this corrects the scopes assumed at sign-in.
+        """
+        if self._static_token or token != self.token or not header:
+            return
+        scopes = parse_scopes(header)
+        if scopes == self.granted_scopes:
+            return
+        logger.info("Linode reports the token's scopes as %s", serialize_scopes(scopes))
+        self.granted_scopes = scopes
+        self._save_token()
+
     def _load_saved_token(self) -> None:
         """Resume an unexpired OAuth token saved by an earlier server process."""
         path = _token_path()

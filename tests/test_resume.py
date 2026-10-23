@@ -317,3 +317,93 @@ def test_no_pause_before_a_read_that_doesnt_guard_the_write_after_it():
         }
     )
     assert set(resume_points(workflow, _methods(workflow))) == {"poll"}
+
+
+# --- Sign-in expiring during a run ---------------------------------------
+
+
+async def _server(monkeypatch, api):
+    monkeypatch.setenv("LINODE_API_TOKEN", "pat")
+
+    class TestServer(LinodeMCPServer):
+        def _api_transport(self):
+            return httpx2.MockTransport(api)
+
+        async def _refresh_specs(self):
+            pass
+
+    server = TestServer()
+    server.spec_manager.save_merged_spec("linode", SPEC)
+    await server.initialize()
+    return server
+
+
+async def test_run_pauses_when_the_sign_in_expires_partway(monkeypatch, no_wait):
+    api = FakeLinode()
+    signed_in = [True]
+    shutdown = api.__class__.__call__
+
+    def expire_after_shutdown(request):
+        if request.url.path.endswith("/shutdown"):
+            signed_in[0] = False
+        return shutdown(api, request)
+
+    server = await _server(monkeypatch, expire_after_shutdown)
+    monkeypatch.setattr(
+        server.auth_manager, "needs_sign_in", lambda scopes: not signed_in[0]
+    )
+    async with Client(server.mcp) as client:
+        body = _body(await client.call_tool(RESIZE, _resize_disk_args()))
+        assert body["status"] == "working"
+        assert body["next"] == "wait_offline"
+        assert body["retry_after_s"] == 0
+        assert "sign-in expired" in body["message"]
+        # The next call signs in first (here, it already has)
+        signed_in[0] = True
+        done = _body(await client.call_tool(RESIZE, {"resume": body["resume"]}))
+    assert done["status"] == "completed"
+    assert [c for c in api.calls if c.startswith("POST")] == [
+        "POST /linode/instances/1/shutdown",
+        "POST /linode/instances/1/disks/5/resize",
+        "POST /linode/instances/1/boot",
+    ]
+
+
+async def test_run_pauses_when_a_poll_gets_401(monkeypatch, no_wait):
+    api = FakeLinode()
+    signed_in = [True]
+    rejected = [False]
+    handle = api.__class__.__call__
+
+    def revoke_during_poll(request):
+        call = f"{request.method} {request.url.path}"
+        if call == "GET /v4/linode/instances/1" and api.status != "running":
+            if not rejected[0]:
+                rejected[0], signed_in[0] = True, False
+                return httpx2.Response(401, json={"errors": [{"reason": "Invalid"}]})
+        return handle(api, request)
+
+    server = await _server(monkeypatch, revoke_during_poll)
+    monkeypatch.setattr(
+        server.auth_manager, "needs_sign_in", lambda scopes: not signed_in[0]
+    )
+    async with Client(server.mcp) as client:
+        body = _body(await client.call_tool(RESIZE, _resize_disk_args()))
+        assert body["next"] == "wait_offline"
+        assert "wait_offline: get-linode-instance -> 401 (signed out)" in body["steps"]
+        signed_in[0] = True
+        done = _body(await client.call_tool(RESIZE, {"resume": body["resume"]}))
+    assert done["status"] == "completed"
+    assert api.calls.count("POST /linode/instances/1/shutdown") == 1
+
+
+async def test_each_call_makes_progress_while_sign_in_is_needed(monkeypatch, no_wait):
+    # A client that can't be prompted before a call signs in during the
+    # call's first step, so a call that starts needing sign-in still runs
+    api = FakeLinode()
+    server = await _server(monkeypatch, api)
+    monkeypatch.setattr(server.auth_manager, "needs_sign_in", lambda scopes: True)
+    async with Client(server.mcp) as client:
+        results = await _run_to_end(client, RESIZE, _resize_disk_args())
+    assert results[-1]["status"] == "completed"
+    assert api.status == "running"
